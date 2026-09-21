@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Dashboard</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own bg-gray-900 background instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+    <main class="w-[90vw] mx-auto p-8">
+        <section id="gateway-section" class="bg-gray-800 p-6 rounded-lg border border-gray-700 mb-8 shadow-xl">
+            <h2 class="text-blue-500 font-bold mb-4 uppercase text-sm tracking-wider">Detected Gateway Router</h2>
+            <div class="flex flex-col md:flex-row items-center justify-between">
+                <div id="gateway-details" class="text-sm font-mono text-cyan-400 space-y-2 flex-1">
+                    <div class="animate-pulse">Detecting gateway...</div>
+                </div>
+            </div>
+        </section>
+
+        <div id="subnet-container" class="flex flex-col gap-6"></div>
+    </main>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const archiveParam = urlParams.get('archive');
+        const qs = archiveParam ? `?archive=${encodeURIComponent(archiveParam)}` : '';
+        const isArchiveMode = !!archiveParam;
+
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        // UI-3: ordering + color coding matches the established topology-
+        // graph legend (links.html's Cytoscape node styles) rather than
+        // inventing a separate palette for this page -- Router #f59e0b,
+        // Switch #3b82f6, Access Point #06b6d4, Unmanaged Switch #10b981,
+        // Docker Host #a855f7.
+        // Server (2026-09-09) is a distinct, separate, manually-assigned
+        // category -- not a Docker Host relabel (an earlier version of
+        // this comment/label conflated the two) -- so it gets its own
+        // color, #6366f1, that doesn't collide with anything above.
+        // Rank order is the requested category sequence: Router, Managed
+        // Switch, Access Point, Unmanaged Switch, Docker Host, Server,
+        // then Endpoint (the un-ranked default) last.
+        const CATEGORY_META = {
+            'Router':           { rank: 0, color: '#f59e0b', border: 'border-amber-500 shadow-amber-900/20', label: 'Router' },
+            'Switch':           { rank: 1, color: '#3b82f6', border: 'border-blue-500 shadow-blue-900/20', label: 'Managed Switch' },
+            // DASH-1 (2026-09-19): CATEGORY_META had no entry for either
+            // smart-switch classification at all -- both silently fell
+            // through to DEFAULT_CATEGORY (green, labeled "Endpoint"),
+            // wrong color AND wrong text, with no error anywhere. Real
+            // case: the GS308Ev4 has been classified 'Smart Switch'
+            // since 2026-09-07 and has been mis-rendered here the whole
+            // time -- only noticed once a second device (a D-Link
+            // DGS-1100-05V2, see SNMP-SWITCH-1) landed in the same
+            // bucket. Ranked alongside 'Switch' (rank 1) since it's
+            // functionally the same kind of device, just identified via
+            // a self-identifying broadcast/SNMP protocol instead of
+            // BRIDGE-MIB/LLDP -- see engine/unification.py's
+            // _SELF_IDENTIFYING_PROTOCOLS. Unverified gets the same
+            // color family at reduced opacity, matching how "Unverified"
+            // already reads as "less certain" everywhere else in the UI.
+            'Smart Switch':               { rank: 1, color: '#2dd4bf', border: 'border-teal-500 shadow-teal-900/20', label: 'Smart Switch' },
+            'Smart Switch (Unverified)':  { rank: 1, color: '#2dd4bf', border: 'border-teal-500/50 shadow-teal-900/10', label: 'Smart Switch (Unverified)' },
+            'Access Point':     { rank: 2, color: '#06b6d4', border: 'border-cyan-500 shadow-cyan-900/20', label: 'Access Point' },
+            'Switch / WAP':     { rank: 2, color: '#06b6d4', border: 'border-cyan-500 shadow-cyan-900/20', label: 'Access Point' },
+            // WAP-1 (2026-09-21): inferred from mobile-hostname clients
+            // (phone/tablet/watch keyword + known-mobile-vendor OUI) on
+            // a segment with no directly-confirmed AP -- same reduced-
+            // opacity "Unverified" treatment as Smart Switch above, same
+            // reasoning: a real signal, but a weaker one than a device's
+            // own SNMP self-report, so it should read that way here too.
+            'Access Point (Unverified)':  { rank: 2, color: '#06b6d4', border: 'border-cyan-500/50 shadow-cyan-900/10', label: 'Access Point (Unverified)' },
+            'Unmanaged Switch': { rank: 3, color: '#10b981', border: 'border-emerald-500 shadow-emerald-900/20', label: 'Unmanaged Switch' },
+            'Docker Host':      { rank: 4, color: '#a855f7', border: 'border-purple-500 shadow-purple-900/20', label: 'Docker Host' },
+            'Server':           { rank: 4.5, color: '#6366f1', border: 'border-indigo-500 shadow-indigo-900/20', label: 'Server' },
+            'Printer':          { rank: 4.8, color: '#14b8a6', border: 'border-teal-500 shadow-teal-900/20', label: 'Printer' },
+        };
+        const DEFAULT_CATEGORY = { rank: 5, color: '#22c55e', border: 'border-green-500/50 hover:border-green-400', label: 'Endpoint' };
+
+        function categoryFor(deviceType) {
+            return CATEGORY_META[deviceType] || DEFAULT_CATEGORY;
+        }
+
+        // Which of a multihomed device's several real IPs is the one
+        // relevant to THIS particular subnet column -- e.g. a device
+        // shown under both 10.10.20 and 192.168.20 sorts by its
+        // 10.10.20.x address in the first column and its 192.168.20.x
+        // address in the second, not by whichever address happens to
+        // be "the" primary overall.
+        function ipInSubnetKey(node, key) {
+            return Array.from(node.ip_list).find(ip => ip && ip.split('.').slice(0, 3).join('.') === key) || '';
+        }
+
+        function ipSortValue(ip) {
+            if (!ip) return [256, 256, 256, 256]; // IP-less devices sort last within their category
+            return ip.split('.').map(Number);
+        }
+
+        function subnetKeyFromCidr(cidr) {
+            return cidr.split('/')[0].split('.').slice(0, 3).join('.');
+        }
+
+        async function fetchTopology() {
+            try {
+                const [statusRes, topoRes, vlansRes, subnetsRes] = await Promise.all([
+                    fetch('/api/status' + qs),
+                    fetch('/api/dashboard_data' + qs),
+                    fetch('/api/vlans' + qs),
+                    fetch('/api/subnets' + qs)
+                ]);
+
+                const status = await statusRes.json();
+                const data = await topoRes.json();
+                const gwIp = status.resolved_gateway;
+
+                // VLAN-6: label each subnet column with its VLAN, where we
+                // actually know the two intersect -- only router-confirmed
+                // bindings (see vlan_subnets / discover_router_vlan_subnets),
+                // never the unconfirmed FDB-inferred guesses, since this is
+                // a heading label, not a per-device detail the user can
+                // cross-check against other context the way the VLAN
+                // Registry page's badges let them.
+                const subnetToVlan = {};
+                (vlansRes.ok ? (await vlansRes.json()).vlans || [] : []).forEach(v => {
+                    (v.subnets || []).forEach(s => {
+                        if (s.confirmed) subnetToVlan[s.subnet] = v;
+                    });
+                });
+
+                // NET-1: column headings show the router's real confirmed
+                // prefix length where known, instead of always assuming
+                // /24. The column GROUPING itself still buckets by 3-octet
+                // prefix (unchanged, out of scope here) -- this only fixes
+                // the displayed suffix, matching any confirmed subnet
+                // whose network address starts with that prefix.
+                const prefixToConfirmedCidr = {};
+                (subnetsRes.ok ? (await subnetsRes.json()).subnets || [] : []).forEach(s => {
+                    const prefix = s.subnet.split('.').slice(0, 3).join('.');
+                    prefixToConfirmedCidr[prefix] = s.subnet;
+                });
+
+                // UI-3: grouped by node_id, not mac_address -- a device
+                // welded from several physical interfaces (e.g. this
+                // router's 4 real MACs, unified by the backend into one
+                // logical_nodes row) was previously split into up to N
+                // separate "device" fragments here, one per MAC, each
+                // only carrying whichever IP(s) that ONE interface
+                // happened to have. That's exactly why the router only
+                // ever appeared in some subnet columns -- most of its
+                // interfaces never got exclude-from-grid treatment (only
+                // the one holding the literal gateway IP did) and leaked
+                // into the grid as separate, incomplete duplicate cards.
+                // Falls back to mac_address for the rare row with no
+                // node_id yet (freshly discovered, not classified yet).
+                const devices = {};
+                data.endpoint_ledger.forEach(row => {
+                    const key = (row.node_id !== null && row.node_id !== undefined) ? `node_${row.node_id}` : `mac_${row.mac_address}`;
+                    if (!devices[key]) devices[key] = { ...row, ip_list: new Set(), subnet_list: new Set(), mac_list: new Set(), primary_ip: null };
+                    const d = devices[key];
+                    if (row.ip_address) d.ip_list.add(row.ip_address);
+                    if (row.subnet) d.subnet_list.add(row.subnet);
+                    if (row.mac_address) d.mac_list.add(row.mac_address);
+                    if (row.is_primary_ip && row.ip_address) d.primary_ip = row.ip_address;
+                });
+                const uniqueDevices = Object.values(devices);
+
+                const gw = uniqueDevices.find(d => d.ip_list.has(gwIp));
+                const gwSubnets = gw ? new Set(Array.from(gw.ip_list).filter(ip => ip).map(ip => ip.split('.').slice(0, 3).join('.'))) : new Set();
+                if (gw) {
+                    document.getElementById('gateway-details').innerHTML = `
+                        <div class="text-gray-200 font-bold text-lg">${escapeHTML(gw.vendor) || 'Unknown Vendor'} <span class="text-xs text-amber-400 border border-amber-500/50 px-2 py-0.5 rounded ml-2">CORE</span></div>
+                        <div class="text-sm text-cyan-400 italic">${escapeHTML(gw.hostname) || 'Gateway Router'}</div>
+                        <div class="mt-2 text-blue-400 break-words text-sm">Active IPs: <span class="text-gray-300">${escapeHTML(Array.from(gw.ip_list).join(', '))}</span></div>
+                        <div class="text-xs text-gray-200 font-mono mt-1">MAC: ${escapeHTML(Array.from(gw.mac_list).join(', '))} | OS: ${escapeHTML(gw.os_family) || 'Unknown'}</div>
+                    `;
+                }
+
+                // UI-3: a multihomed device is pushed into EVERY subnet
+                // bucket it has a real address in, not just one arbitrary
+                // "primary" bucket -- otherwise a genuinely dual-homed
+                // device is only ever findable under one of the two (or
+                // more) subnets a user might reasonably look under.
+                const subnets = {};
+                uniqueDevices.forEach(node => {
+                    if (node.ip_list.has(gwIp)) return;
+                    const realSubnets = Array.from(node.subnet_list).filter(Boolean);
+                    node.isMultihomed = realSubnets.length > 1;
+                    const keys = realSubnets.length > 0
+                        ? [...new Set(realSubnets.map(subnetKeyFromCidr))]
+                        : ['Layer 2 (No IP)'];
+                    keys.forEach(key => {
+                        if (!subnets[key]) subnets[key] = [];
+                        subnets[key].push(node);
+                    });
+                });
+                const container = document.getElementById('subnet-container');
+                container.innerHTML = '';
+
+                Object.keys(subnets).sort((a, b) => {
+                    if (gwSubnets.has(a) && !gwSubnets.has(b)) return -1;
+                    if (!gwSubnets.has(a) && gwSubnets.has(b)) return 1;
+                    return a.localeCompare(b);
+                }).forEach(subnet => {
+                    const column = document.createElement('div');
+                    column.className = "bg-gray-800 rounded-lg border border-gray-700 p-4 h-fit shadow-lg";
+                    const displayCidr = prefixToConfirmedCidr[subnet] || `${subnet}.0/24`;
+                    const matchedVlan = subnetToVlan[displayCidr];
+                    const vlanLabel = matchedVlan
+                        ? `VLAN ${matchedVlan.vlan_id} &middot; ${escapeHTML(matchedVlan.vlan_name || 'Unnamed')}`
+                        : '&nbsp;';
+                    column.innerHTML = `
+                        <h3 class="text-green-400 font-mono font-bold pb-1">${escapeHTML(displayCidr)}</h3>
+                        <div class="text-[10px] text-amber-400 font-mono mb-4 pb-2 border-b border-gray-700">${vlanLabel}</div>
+                    `;
+                    // Each subnet now gets its own full-width pane (the
+                    // outer #subnet-container stacks panes vertically
+                    // instead of squeezing every subnet into a shared
+                    // responsive column grid) -- so devices need their
+                    // own grid here to use that width, flowing left to
+                    // right / top to bottom in the same category-then-IP
+                    // sort order as before rather than one long vertical
+                    // list. auto-fit (not auto-fill) so a pane with only
+                    // a couple of devices stretches them to fill the row
+                    // instead of leaving a visibly empty track.
+                    const deviceGrid = document.createElement('div');
+                    deviceGrid.className = "grid gap-3 grid-cols-[repeat(auto-fit,minmax(240px,1fr))]";
+                    column.appendChild(deviceGrid);
+
+                    subnets[subnet].sort((a, b) => {
+                        const catDiff = categoryFor(a.device_type).rank - categoryFor(b.device_type).rank;
+                        if (catDiff !== 0) return catDiff;
+                        const ipA = ipSortValue(ipInSubnetKey(a, subnet));
+                        const ipB = ipSortValue(ipInSubnetKey(b, subnet));
+                        for (let i = 0; i < 4; i++) { if (ipA[i] !== ipB[i]) return ipA[i] - ipB[i]; }
+                        return (a.hostname || '').localeCompare(b.hostname || '');
+                    }).forEach(node => {
+                            const cat = categoryFor(node.device_type);
+                            const osTag = node.os_family ? `<span class="text-[9px] bg-gray-700 text-gray-300 px-1 py-0.5 rounded">${escapeHTML(node.os_family)}</span>` : '';
+                            const multihomedTag = node.isMultihomed ? `<span class="text-[9px] bg-purple-900/50 text-purple-300 border border-purple-700/50 px-1 py-0.5 rounded" title="Present on multiple subnets">&#8644; Multihomed</span>` : '';
+                            // DASH-2 (2026-09-19): device_status (device_state.status,
+                            // computed server-side every tick) has been flowing through
+                            // in every endpoint_ledger row all along -- the SQL SELECT
+                            // and the {...row} spread both already carry it -- but
+                            // nothing here ever read it. A device with a stored IP from
+                            // hours ago rendered identically to one seen seconds ago, no
+                            // visual distinction at all. Real case: a multi-homed test
+                            // host's VM interfaces stayed looking fully live on this grid for
+                            // hours after the host itself went offline, correctly
+                            // marked 'offline' in device_state the whole time. Only
+                            // 'offline' specifically (not any falsy/missing value) --
+                            // a device_state row can be absent entirely for something
+                            // freshly discovered before device_state_tracker has run
+                            // yet, which isn't the same claim as "confirmed offline".
+                            // DASH-2 follow-up (2026-09-19): is_virtual devices (dark-
+                            // matter inferred pseudo-switches, see engine/inference_engine.py)
+                            // have no real device_state tracking at all -- device_state_tracker
+                            // pings/ARP-checks real hosts, and a synthetic 02:ff:... pseudo-MAC
+                            // is never going to answer either, so its device_state row (created
+                            // once, first_seen == last_seen forever) is permanently stuck at
+                            // 'offline' regardless of whether the inference is still current.
+                            // The real liveness signal for one of these is whether inference_engine
+                            // is still re-confirming it each cycle (l3_bindings.last_seen on its
+                            // pseudo-IP) -- this card being present in endpoint_ledger AT ALL
+                            // already means that's true THIS cycle, so for a virtual node,
+                            // presence itself is the online signal, not device_status.
+                            const offlineTag = (node.device_status === 'offline' && !node.is_virtual) ? `<span class="text-[9px] bg-red-900/50 text-red-300 border border-red-700/50 px-1 py-0.5 rounded">Offline</span>` : '';
+                            const cardOpacity = (node.device_status === 'offline' && !node.is_virtual) ? 'opacity-50' : '';
+                            const orderedIps = Array.from(node.ip_list).filter(ip => ip);
+                            const primary = node.primary_ip;
+                            const others = orderedIps.filter(ip => ip !== primary);
+                            const ipDisplay = primary
+                                ? `<span class="font-bold">${escapeHTML(primary)}</span>${others.length ? ` <span class="text-blue-500/70">+ ${others.map(escapeHTML).join(', ')}</span>` : ''}`
+                                : (escapeHTML(orderedIps.join(', ')) || 'No IP Allocated');
+                            const link = `device.html?id=${encodeURIComponent(node.node_id)}${isArchiveMode ? '&archive=' + encodeURIComponent(archiveParam) : ''}`;
+                            deviceGrid.insertAdjacentHTML('beforeend', `
+                                <a href="${link}" class="block p-3 bg-gray-800 rounded shadow-sm text-xs border-l-4 ${cat.border} hover:bg-gray-700 transition cursor-pointer ${cardOpacity}">
+                                    <div class="flex justify-between items-start mb-0.5">
+                                        <div class="font-bold text-gray-200 text-sm truncate pr-2"><span style="color:${cat.color}">&#9632;</span> ${escapeHTML(node.hostname) || escapeHTML(node.vendor) || 'Unknown'}</div>
+                                        <div class="flex gap-1 flex-shrink-0">${offlineTag}${osTag}${multihomedTag}</div>
+                                    </div>
+                                    <div class="text-sm font-bold text-cyan-400 italic mb-1 truncate">${escapeHTML(node.vendor) || 'Unknown Vendor'}${node.category ? ` <span class="text-purple-400 not-italic font-normal text-[10px]">&middot; ${escapeHTML(node.category)}</span>` : ''}</div>
+                                    <div class="text-blue-400 font-mono break-all mb-1">${ipDisplay}</div>
+                                    <div class="flex justify-between text-gray-200 font-mono text-xs">
+                                        <span>${escapeHTML(Array.from(node.mac_list).join(', '))}</span>
+                                        <span class="text-sm" style="color:${cat.color}">${escapeHTML(cat.label)}</span>
+                                    </div>
+                                </a>
+                            `);
+                        });
+                    container.appendChild(column);
+                });
+            } catch (err) { console.error("Dashboard Render Error:", err); }
+        }
+        
+        fetchTopology();
+        if (!isArchiveMode) setInterval(fetchTopology, 15000);
+    </script>
+</body>
+</html>

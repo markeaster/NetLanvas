@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Subnets</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <script src="device-tooltip.js"></script>
+    <style>
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own bg-gray-900 background instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        /* Matches renderGrid()'s theme branch for "never used" cells below --
+           bg-blue-900/text-blue-500 (dark theme) is a heavy near-black navy
+           that stands out incongruously once the surrounding UI goes light,
+           so light theme gets the inverted light-blue-chip treatment
+           instead. This legend swatch is static markup, so it can't branch
+           in JS -- scoped here to match. */
+        [data-theme="light"] #unused-swatch { background-color: #dbeafe; border-color: #93c5fd; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+        .grid-256 { grid-template-columns: repeat(16, minmax(0, 1fr)); }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+    <main class="w-[90vw] mx-auto p-8">
+        <header class="mb-8 border-b border-gray-800 pb-4 flex justify-between items-end">
+            <div>
+                <h1 class="text-2xl font-bold text-white tracking-widest uppercase">Subnets</h1>
+                <p class="text-xs text-cyan-500 font-mono mt-1">Every address in a subnet, one cell each -- hover for detail, click to inspect</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <div id="vlan-label" class="text-[10px] text-amber-400 font-mono uppercase tracking-wider"></div>
+                <select id="subnet-select" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded px-3 py-2 focus:outline-none focus:border-blue-500 min-w-[180px]"></select>
+            </div>
+        </header>
+
+        <div id="grid-wrapper" class="bg-gray-800 rounded-lg border border-gray-700 p-6 shadow-xl">
+            <div class="max-w-3xl mx-auto mb-4">
+                <h2 id="subnet-heading" class="text-green-400 font-mono font-bold text-lg tracking-wider"></h2>
+            </div>
+            <div id="grid" class="grid grid-256 gap-1 max-w-3xl mx-auto"></div>
+        </div>
+
+        <div id="legend-wrapper" class="fixed bottom-5 left-5 z-10 group">
+            <div class="w-10 h-10 rounded-full bg-gray-800/90 border border-gray-700/60 shadow-2xl backdrop-blur-md flex items-center justify-center text-cyan-400 font-mono font-bold text-base pointer-events-auto select-none cursor-help transition-opacity duration-150 group-hover:opacity-0" title="Legend">?</div>
+            <div id="legend" class="absolute bottom-0 left-0 bg-gray-800/95 border border-gray-700/60 p-4 rounded shadow-2xl font-mono text-xs text-gray-300 backdrop-blur-md select-none opacity-0 pointer-events-none scale-95 origin-bottom-left transition-all duration-150 group-hover:opacity-100 group-hover:pointer-events-auto group-hover:scale-100">
+                <h3 class="text-gray-200 font-bold mb-3 tracking-widest border-b border-gray-700/80 pb-1.5 text-[10px]">ADDRESS STATUS</h3>
+                <div class="flex flex-col gap-2.5">
+                    <div class="flex items-center gap-3"><span id="unused-swatch" class="w-4 h-4 bg-blue-900 border border-blue-700 block rounded-sm"></span><span class="text-cyan-400">Never used</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-green-500 block rounded-sm"></span><span class="text-cyan-400">Endpoint live</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-amber-500 block rounded-sm"></span><span class="text-cyan-400">Used, currently offline</span></div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const archiveParam = urlParams.get('archive');
+        const qs = archiveParam ? `?archive=${encodeURIComponent(archiveParam)}` : '';
+        const isArchiveMode = !!archiveParam;
+
+        function subnetKeyFromCidr(cidr) {
+            return cidr.split('/')[0].split('.').slice(0, 3).join('.');
+        }
+
+        let ledgerBySubnet = {};   // "10.10.10" -> { "42": row, ... }
+        let subnetOptions = [];    // [{ key, displayCidr, vlanLabel }]
+        let selectedKey = null;
+
+        function renderGrid() {
+            const grid = document.getElementById('grid');
+            grid.innerHTML = '';
+            const byOctet = ledgerBySubnet[selectedKey] || {};
+
+            // "Never used" is the bulk of every grid, so its colour choice
+            // carries the whole page's weight -- bg-blue-900/text-blue-500
+            // is a heavy near-black navy chip, fine matching the rest of
+            // dark theme's own chrome, but incongruously heavy once
+            // everything else has gone light. Light theme gets it reversed:
+            // a light-blue chip with dark-blue text instead.
+            const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+            const unusedCellClass = isLight
+                ? 'bg-blue-100 border border-blue-300 text-blue-700'
+                : 'bg-blue-900 border border-blue-800 text-blue-500';
+
+            for (let octet = 0; octet <= 255; octet++) {
+                const row = byOctet[octet];
+                let cellClass = unusedCellClass;
+                let interactive = false;
+
+                if (row) {
+                    interactive = true;
+                    if (row.device_status === 'offline') {
+                        cellClass = 'bg-amber-500 border border-amber-400 text-amber-950 font-bold hover:bg-amber-400';
+                    } else {
+                        cellClass = 'bg-green-500 border border-green-400 text-green-950 font-bold hover:bg-green-400';
+                    }
+                }
+
+                const cell = document.createElement(row && row.node_id ? 'a' : 'div');
+                if (row && row.node_id) {
+                    cell.href = `device.html?id=${encodeURIComponent(row.node_id)}${isArchiveMode ? '&archive=' + encodeURIComponent(archiveParam) : ''}`;
+                }
+                cell.className = `aspect-square flex items-center justify-center rounded-sm text-[9px] font-mono transition cursor-${interactive ? 'pointer' : 'default'} ${cellClass}`;
+                cell.textContent = octet;
+
+                if (interactive) {
+                    cell.addEventListener('mouseenter', (e) => {
+                        const tooltipData = {
+                            hostname: row.hostname || row.vendor || 'Unknown',
+                            type: row.device_type || 'Endpoint',
+                            ip: row.ip_address,
+                            mac: row.mac_address || 'Unknown',
+                            vlan: row.vlan_id || 'N/A',
+                            vendor: row.vendor || 'Unknown',
+                            os: row.os_family || 'N/A',
+                            ssid: row.wireless_ssid || 'N/A',
+                            virtual: row.is_virtual ? 'Yes' : 'No',
+                            source: row.discovery_source || 'N/A',
+                            last_seen: row.last_seen || 'N/A',
+                            weld: row.weld_confidence ? `${row.weld_confidence}%` : 'N/A',
+                            sysdescr: row.snmp_sysdescr || 'N/A',
+                            footerText: row.node_id ? 'Click to Inspect' : undefined,
+                        };
+                        if (row.category) tooltipData.category = row.category;
+                        if (row.market_segment) tooltipData.market_segment = row.market_segment;
+                        if (row.http_header) tooltipData.http_header = row.http_header;
+                        DeviceTooltip.show(e.clientX, e.clientY, tooltipData);
+                    });
+                    cell.addEventListener('mousemove', (e) => DeviceTooltip.move(e.clientX, e.clientY));
+                    cell.addEventListener('mouseleave', () => DeviceTooltip.hide());
+                }
+
+                grid.appendChild(cell);
+            }
+        }
+
+        function populateSubnetSelect() {
+            const select = document.getElementById('subnet-select');
+            const previous = select.value;
+            select.innerHTML = subnetOptions.map(o => `<option value="${o.key}">${o.displayCidr}</option>`).join('');
+            if (subnetOptions.some(o => o.key === previous)) {
+                select.value = previous;
+            } else if (subnetOptions.length > 0) {
+                select.value = subnetOptions[0].key;
+            }
+            selectedKey = select.value || null;
+            updateVlanLabel();
+        }
+
+        function updateVlanLabel() {
+            const opt = subnetOptions.find(o => o.key === selectedKey);
+            document.getElementById('vlan-label').innerHTML = opt && opt.vlanLabel ? opt.vlanLabel : '&nbsp;';
+            document.getElementById('subnet-heading').textContent = opt ? opt.displayCidr : '';
+        }
+
+        document.getElementById('subnet-select').addEventListener('change', (e) => {
+            selectedKey = e.target.value;
+            updateVlanLabel();
+            renderGrid();
+        });
+
+        async function loadData() {
+            try {
+                const [dashRes, subnetsRes, vlansRes] = await Promise.all([
+                    fetch('/api/dashboard_data' + qs),
+                    fetch('/api/subnets' + qs),
+                    fetch('/api/vlans' + qs),
+                ]);
+                const dash = await dashRes.json();
+
+                const subnetToVlan = {};
+                (vlansRes.ok ? (await vlansRes.json()).vlans || [] : []).forEach(v => {
+                    (v.subnets || []).forEach(s => {
+                        if (s.confirmed) subnetToVlan[s.subnet] = v;
+                    });
+                });
+
+                const prefixToConfirmedCidr = {};
+                (subnetsRes.ok ? (await subnetsRes.json()).subnets || [] : []).forEach(s => {
+                    const prefix = s.subnet.split('.').slice(0, 3).join('.');
+                    prefixToConfirmedCidr[prefix] = s.subnet;
+                });
+
+                ledgerBySubnet = {};
+                const seenKeys = new Set();
+                (dash.endpoint_ledger || []).forEach(row => {
+                    if (!row.subnet || !row.ip_address) return;
+                    const key = subnetKeyFromCidr(row.subnet);
+                    const octet = parseInt(row.ip_address.split('.')[3], 10);
+                    if (isNaN(octet)) return;
+                    seenKeys.add(key);
+                    if (!ledgerBySubnet[key]) ledgerBySubnet[key] = {};
+                    // Multiple rows can share an IP+subnet only in edge
+                    // cases (stale data mid-transition) -- last one wins,
+                    // consistent with how the rest of the ledger is built.
+                    ledgerBySubnet[key][octet] = row;
+                });
+
+                // Union of router-confirmed subnets (always shown, even
+                // with zero live devices yet) and anything actually seen
+                // in the ledger but not router-confirmed.
+                const allKeys = new Set([...Object.keys(prefixToConfirmedCidr), ...seenKeys]);
+                subnetOptions = Array.from(allKeys).sort().map(key => {
+                    const displayCidr = prefixToConfirmedCidr[key] || `${key}.0/24`;
+                    const matchedVlan = subnetToVlan[displayCidr];
+                    const vlanLabel = matchedVlan
+                        ? `VLAN ${matchedVlan.vlan_id} &middot; ${matchedVlan.vlan_name || 'Unnamed'}`
+                        : '';
+                    return { key, displayCidr, vlanLabel };
+                });
+
+                populateSubnetSelect();
+                renderGrid();
+            } catch (err) {
+                console.error('Subnets Render Error:', err);
+            }
+        }
+
+        // Same reasoning as links.html/fbd.html: renderGrid()'s theme
+        // branch is only read at render time, so a theme change in
+        // another tab/frame needs an explicit re-render to pick it up.
+        window.addEventListener('storage', function (e) {
+            if (e.key === 'netlanvas_ui_theme' && selectedKey) renderGrid();
+        });
+
+        loadData();
+        if (!isArchiveMode) setInterval(loadData, 15000);
+    </script>
+</body>
+</html>

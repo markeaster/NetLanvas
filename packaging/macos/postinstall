@@ -1,0 +1,89 @@
+#!/bin/bash
+# NATIVE-16 (macOS): mirrors netlanvas.iss's [Dirs]/[Run] sections --
+# create the mutable data tree with the right ownership before the
+# LaunchDaemon (which runs as root) ever starts, then load it.
+#
+# No firewall-rule step here the way Windows needed one: macOS's
+# Application Firewall (off by default on most Macs) prompts the user
+# interactively the first time any app accepts an incoming connection
+# rather than silently dropping it, and there's no pre-creatable
+# "allow, but disabled" rule equivalent to pre-provision -- that
+# prompt is standard, expected macOS behavior for any app, not
+# something this installer needs to work around.
+set -e
+
+APP_DIR="/Library/Application Support/NetLanvas"
+PLIST="/Library/LaunchDaemons/com.netlanvas.daemon.plist"
+
+mkdir -p "$APP_DIR/data/tls"
+mkdir -p "$APP_DIR/logs"
+chown -R root:wheel "$APP_DIR"
+chmod -R 755 "$APP_DIR"
+
+chmod +x "$APP_DIR/bin/netlanvas"
+chmod +x "$APP_DIR/bin/tools/ping_sweep_helper/netlanvas_ping_sweep"
+chmod +x "$APP_DIR/bin/tools/snmp_helper/netlanvas_snmp_helper"
+
+chown root:wheel "$PLIST"
+chmod 644 "$PLIST"
+
+launchctl bootstrap system "$PLIST"
+
+# NATIVE-16: same lesson as the Windows installer's missing uninstall
+# shortcut ("we need an uninstaller" -- real user feedback,
+# 2026-09-02) -- .pkg has no built-in uninstall entry at all (unlike
+# Inno Setup's automatic Apps & Features registration), so this
+# installer ships and places its own uninstaller up front rather than
+# waiting to be asked. Landed in /Applications so it's exactly where a
+# Mac user already expects to find "the app" to remove it, even though
+# NetLanvas itself has no windowed app to put there.
+cp "$APP_DIR/uninstall.sh" "/Applications/Uninstall NetLanvas.command"
+chmod +x "/Applications/Uninstall NetLanvas.command"
+
+# NATIVE-16 follow-up: real user feedback (2026-09-02, first macOS
+# .pkg test on Marks-MacBook-Air) --
+#   "no post install message, just a close button. Browser started
+#   manually... No setup token pasted automatically."
+# Apple's Installer.app has no equivalent of Inno Setup's scriptable
+# Finished page -- there is no hook to inject dynamic text (the real
+# fingerprint/token) into its generic "The installation was
+# successful" screen. The practical equivalent here: wait for the
+# daemon to actually be listening (postinstall runs synchronously
+# during the install, well before the user ever sees that generic
+# screen, so there's no click-race to guard against the way Windows
+# had one), then show a native dialog with the real welcome card
+# content and open the browser automatically -- both run as the
+# logged-in console user via sudo -u, since a root postinstall script
+# has no GUI session of its own to open a browser or dialog into.
+#
+# The setup token WAS always being generated and auto-filled correctly
+# by the app itself (get_setup_token(), same code path as Windows) --
+# what actually failed in that test was that the browser was pointed
+# at a leftover manual test process on a different data directory, not
+# the real installed daemon; this narrower fix (waiting for and reading
+# THIS install's own welcome.txt) doesn't change that underlying
+# mechanism, just makes sure the user sees it without having to find
+# the URL and any hint text themselves.
+CONSOLE_USER=$(stat -f%Su /dev/console)
+WELCOME_FILE="$APP_DIR/data/tls/welcome.txt"
+
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+    ATTEMPTS=0
+    while [ ! -f "$WELCOME_FILE" ] && [ "$ATTEMPTS" -lt 20 ]; do
+        sleep 0.5
+        ATTEMPTS=$((ATTEMPTS + 1))
+    done
+
+    if [ -f "$WELCOME_FILE" ]; then
+        FINGERPRINT=$(grep -A1 "fingerprint matches" "$WELCOME_FILE" | tail -1 | xargs)
+        TOKEN=$(grep -A1 "setup token" "$WELCOME_FILE" | tail -1 | xargs)
+        DIALOG_TEXT="NetLanvas is installed and running. Your browser will now open to finish setup.\n\nIt will show a certificate warning first -- NetLanvas uses a private certificate it generates for this device, so this is expected. Click Advanced (Safari: 'Show Details'), then Proceed/Visit This Website -- but verify this fingerprint matches what your browser shows first:\n\n${FINGERPRINT}\n\nOne-time setup token (already filled in for you on the page that follows):\n${TOKEN}"
+    else
+        DIALOG_TEXT="NetLanvas is installed and running. Your browser will now open to finish setup.\n\nIt will show a certificate warning first -- NetLanvas uses a private certificate it generates for this device, so this is expected. Click Advanced (Safari: 'Show Details'), then Proceed/Visit This Website to continue; the setup token is already filled in on the page that follows."
+    fi
+
+    sudo -u "$CONSOLE_USER" osascript -e "display dialog \"$DIALOG_TEXT\" with title \"NetLanvas Setup\" buttons {\"Continue\"} default button 1 with icon note" >/dev/null 2>&1 || true
+    sudo -u "$CONSOLE_USER" open "https://127.0.0.1:8899/dashboard/settings.html" || true
+fi
+
+exit 0

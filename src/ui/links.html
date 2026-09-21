@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Infrastructure Graph</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.23.0/cytoscape.min.js"></script>
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <script src="device-tooltip.js"></script>
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-cxtmenu@3.5.0/cytoscape-cxtmenu.min.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; font-family: monospace; background: var(--color-gray-900); height: 100vh; display: flex; flex-direction: column; }
+        #cy-container { flex-grow: 1; position: relative; width: 100%; background: var(--color-gray-900); }
+        #cy-container::before {
+            content: ""; position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: 0;
+        }
+        #cy { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        #title-overlay { position: absolute; bottom: 20px; right: 20px; z-index: 10; color: #475569; text-align: right; pointer-events: none;}
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 antialiased">
+    <div id="cy-container">
+        <div class="absolute top-5 left-5 z-20 flex flex-col items-start gap-2">
+            <button id="btn-back" onclick="renderTopology('backbone')" class="hidden bg-gray-800/90 hover:bg-gray-700 text-gray-200 font-mono text-xs px-4 py-2 border border-gray-600 rounded shadow-xl transition-all cursor-pointer backdrop-blur-md flex items-center gap-2">
+                <span class="text-blue-400 font-bold text-lg leading-none mt-[-2px]">&larr;</span> Return to Backbone
+            </button>
+            <div id="autorefresh-control" class="bg-gray-800/90 border border-gray-600 rounded shadow-xl backdrop-blur-md px-3 py-2 flex items-center gap-2">
+                <label for="autorefresh-select" class="text-[10px] text-cyan-400 uppercase tracking-widest font-mono select-none">Auto-Refresh</label>
+                <select id="autorefresh-select" class="bg-gray-900 border border-gray-600 text-gray-200 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-blue-500">
+                    <option value="0">Off</option>
+                    <option value="15000">15s</option>
+                    <option value="30000">30s</option>
+                    <option value="60000">60s</option>
+                </select>
+            </div>
+            <div id="label-mode-control" class="bg-gray-800/90 border border-gray-600 rounded shadow-xl backdrop-blur-md px-3 py-2 flex items-center gap-2">
+                <label for="label-mode-select" class="text-[10px] text-cyan-400 uppercase tracking-widest font-mono select-none">Label</label>
+                <select id="label-mode-select" class="bg-gray-900 border border-gray-600 text-gray-200 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-blue-500">
+                    <option value="ip">IP Address</option>
+                    <option value="hostname">Hostname</option>
+                </select>
+            </div>
+        </div>
+        <div id="legend-wrapper" class="absolute bottom-5 left-5 z-10 group">
+            <div class="w-10 h-10 rounded-full bg-gray-800/90 border border-gray-700/60 shadow-2xl backdrop-blur-md flex items-center justify-center text-cyan-400 font-mono font-bold text-base pointer-events-auto select-none cursor-help transition-opacity duration-150 group-hover:opacity-0" title="Legend">?</div>
+            <div id="legend" class="absolute bottom-0 left-0 bg-gray-800/95 border border-gray-700/60 p-4 rounded shadow-2xl font-mono text-xs text-gray-300 backdrop-blur-md select-none flex gap-8 opacity-0 pointer-events-none scale-95 origin-bottom-left transition-all duration-150 group-hover:opacity-100 group-hover:pointer-events-auto group-hover:scale-100">
+            <div>
+                <h3 class="text-gray-200 font-bold mb-3 tracking-widest border-b border-gray-700/80 pb-1.5 text-[10px]">DEVICE TYPES</h3>
+                <div class="flex flex-col gap-2.5">
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#f59e0b] border-2 border-[#fbbf24] block" style="clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);"></span><span class="text-cyan-400">Core Router / Gateway</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#3b82f6] block rounded-sm"></span><span class="text-cyan-400">Managed Infrastructure Switch</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#a855f7] block" style="clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);"></span><span class="text-cyan-400">Smart Switch (No SNMP)</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#a855f7] block" style="clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%); opacity: 0.5;"></span><span class="text-cyan-400">Smart Switch (Unverified Guess)</span></div>
+                    <div class="flex items-center gap-3"><div class="w-4 h-4 flex items-center justify-center"><span class="w-3 h-3 bg-[#10b981] block rotate-45"></span></div><span class="text-cyan-400">Confirmed Unmanaged Switch</span></div>
+                    <div class="flex items-center gap-3"><div class="w-4 h-4 flex items-center justify-center"><span class="w-3 h-3 bg-[#10b981] border-2 border-dashed border-[#f59e0b] block rotate-45"></span></div><span class="text-amber-400">Inferred Unmanaged Switch</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#06b6d4] block" style="clip-path: polygon(50% 0%, 0% 100%, 100% 100%);"></span><span class="text-cyan-400">Wireless Access Point (WAP)</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#6366f1] block rounded-md"></span><span class="text-cyan-400">Server</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#a855f7] block rounded-md"></span><span class="text-cyan-400">Docker Host</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#14b8a6] block rounded-md"></span><span class="text-cyan-400">Printer</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#22c55e] block rounded-full"></span><span class="text-cyan-400">Connected Endpoint</span></div>
+                    <div class="flex items-center gap-3 mt-1 pt-1 border-t border-gray-700/50"><span class="w-4 h-4 bg-transparent border-2 border-dashed border-[#f59e0b] block rounded-sm"></span><span class="text-amber-400">Ambiguous Data Boundary</span></div>
+                </div>
+            </div>
+            <div>
+                <h3 class="text-gray-200 font-bold mb-3 tracking-widest border-b border-gray-700/80 pb-1.5 text-[10px]">VLAN FILTER</h3>
+                <div class="flex flex-col gap-2.5">
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-transparent border-2 border-solid border-[#ec4899] block rounded-sm"></span><span class="text-[#ec4899]">Confirmed Match</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-4 bg-transparent border-2 border-dashed border-[#ec4899] block rounded-sm"></span><span class="text-[#ec4899]">Possible Carrier</span></div>
+                </div>
+            </div>
+            <div>
+                <h3 class="text-gray-200 font-bold mb-3 tracking-widest border-b border-gray-700/80 pb-1.5 text-[10px]">LINK SPEEDS</h3>
+                <div class="flex flex-col gap-2.5">
+                    <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#ef4444] block"></span><span class="text-cyan-400">10 Mbps</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#d946ef] block"></span><span class="text-cyan-400">100 Mbps</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-0.5 block" style="background: var(--color-speed-1gbps);"></span><span class="text-cyan-400">1 Gbps</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#06b6d4] block"></span><span class="text-cyan-400">2.5 Gbps</span></div>
+                    <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#22c55e] block"></span><span class="text-cyan-400">10 Gbps</span></div>
+                </div>
+            </div>
+            </div>
+        </div>
+        <div id="vlan-filter-control" class="absolute top-5 right-5 z-20 bg-gray-800/90 border border-gray-600 rounded shadow-xl backdrop-blur-md px-3 py-2 flex items-center gap-2">
+            <label for="vlan-filter-select" class="text-[10px] text-cyan-400 uppercase tracking-widest font-mono select-none">VLAN</label>
+            <select id="vlan-filter-select" class="bg-gray-900 border border-gray-600 text-gray-200 text-xs font-mono rounded px-2 py-1 focus:outline-none focus:border-blue-500 max-w-[160px]">
+                <option value="">All</option>
+            </select>
+        </div>
+        <div id="title-overlay"></div>
+        <div id="cy"></div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const archiveParam = urlParams.get('archive');
+        const qs = archiveParam ? `?archive=${encodeURIComponent(archiveParam)}` : '';
+        const isArchiveMode = !!archiveParam;
+
+        // A device with no real resolved hostname gets its own MAC address
+        // stored in the hostname column as a placeholder (confirmed live,
+        // 2026-09-09: logical_nodes.hostname === its own l2_interfaces.mac_
+        // address for an AP with SOURCE=ROUTER_ARP_CACHE and no SNMP/DNS
+        // name ever resolved) -- not a real name, so Hostname label mode
+        // must not display it as one, or fall back to the same string for
+        // the tooltip's IP field either.
+        const looksLikeMac = (s) => /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(String(s || '').trim());
+
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        // Speeds are colour-coded regardless of theme, but '1 Gbps' (by
+        // far the most common link speed on a home/office LAN) and the
+        // "unknown speed" default read their actual hex from theme.css's
+        // --color-speed-1gbps/--color-speed-unknown -- see that file's
+        // comment for why (pure white was invisible on a light canvas).
+        // Every other speed's hex is already saturated enough to hold up
+        // unchanged on both backgrounds, so those stay literal.
+        function isLightTheme() {
+            return document.documentElement.getAttribute('data-theme') === 'light';
+        }
+        function themeVar(name) {
+            return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        }
+        function getSpeedColor(speedStr) {
+            if (!speedStr) return themeVar('--color-speed-unknown');
+            if (speedStr === 'WiFi') return '#3b82f6';
+            if (speedStr.includes('10 Gbps')) return '#22c55e';
+            if (speedStr.includes('2.5 Gbps')) return '#06b6d4';
+            if (speedStr.includes('1 Gbps')) return themeVar('--color-speed-1gbps');
+            if (speedStr.includes('100 Mbps')) return '#d946ef';
+            if (speedStr.includes('10 Mbps')) return '#ef4444';
+            return themeVar('--color-speed-unknown');
+        }
+
+        let globalData = {};
+        let currentViewMode = 'backbone';
+        let cy = null;
+        let labelMode = 'ip';
+        try { labelMode = localStorage.getItem('netlanvas_graph_label_mode') || 'ip'; } catch (e) {}
+        let isContextMenuOpen = false;
+        let selectedVlanFilter = '';
+
+        // VLAN-4: highlight one VLAN's footprint on demand rather than
+        // permanently decorating the graph -- see punch list VLAN-4.
+        // Deliberately does NOT try to color nodes by "their" VLAN: most
+        // backbone links here are trunks carrying every VLAN at once, so
+        // a single color per infrastructure node would be arbitrary or
+        // outright wrong. Precision differs by view:
+        //   - Node Inspection view: client leaf nodes each have one real,
+        //     unambiguous vlan_id (from endpoint_ledger) -- highlighted
+        //     exactly.
+        //   - Backbone view: no client nodes are even rendered here, so
+        //     the best honest signal is "this infrastructure node has at
+        //     least one client on the selected VLAN" -- marked as a
+        //     lighter/dashed indicator, distinct from the precise match
+        //     ring, never claiming false certainty about trunk contents.
+        function applyVlanFilter() {
+            if (!cy) return;
+            cy.batch(() => {
+                cy.elements().removeClass('vlan-dim vlan-match vlan-trunk-path');
+                if (!selectedVlanFilter) return;
+
+                const vlanIdByMac = {};
+                (globalData.dashData?.endpoint_ledger || []).forEach(e => {
+                    if (e.mac_address) vlanIdByMac[e.mac_address.toLowerCase()] = e.vlan_id;
+                });
+                const matches = (mac) => mac && String(vlanIdByMac[mac.toLowerCase()]) === selectedVlanFilter;
+
+                if (currentViewMode === 'backbone') {
+                    const clientMapping = globalData.data?.client_mapping || {};
+                    const carryingParents = new Set();
+                    Object.entries(clientMapping).forEach(([mac, m]) => {
+                        if (matches(mac)) carryingParents.add(String(m.parent_node_id));
+                    });
+                    cy.nodes().forEach(n => {
+                        n.addClass(carryingParents.has(n.id()) ? 'vlan-trunk-path' : 'vlan-dim');
+                    });
+                    cy.edges().forEach(e => {
+                        const touches = carryingParents.has(e.data('source')) || carryingParents.has(e.data('target'));
+                        e.addClass(touches ? 'vlan-trunk-path' : 'vlan-dim');
+                    });
+                } else {
+                    cy.nodes('.client').forEach(n => {
+                        n.addClass(matches(n.data('raw_mac')) ? 'vlan-match' : 'vlan-dim');
+                    });
+                    cy.nodes(':not(.client)').forEach(n => n.addClass('vlan-trunk-path'));
+                    cy.edges().forEach(e => {
+                        const targetNode = e.target();
+                        e.addClass(targetNode.hasClass('vlan-match') ? 'vlan-trunk-path' : 'vlan-dim');
+                    });
+                }
+            });
+        }
+
+        function populateVlanFilterOptions(vlans) {
+            const select = document.getElementById('vlan-filter-select');
+            const previousValue = select.value;
+            select.innerHTML = '<option value="">All</option>';
+            // A VLAN with no associated subnet has no devices to highlight
+            // anyway -- selecting it would just dim everything with nothing
+            // to show, so it's excluded here unconditionally (unlike the
+            // VLAN Registry page's toggle, there's no "reveal it anyway"
+            // case that would actually do anything for this control).
+            (vlans || []).filter(v => v.subnets && v.subnets.length > 0).forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = String(v.vlan_id);
+                opt.textContent = `${v.vlan_id} - ${v.vlan_name || 'Unnamed'}`;
+                select.appendChild(opt);
+            });
+            select.value = previousValue;
+        }
+
+        document.getElementById('vlan-filter-select').addEventListener('change', (e) => {
+            selectedVlanFilter = e.target.value;
+            applyVlanFilter();
+        });
+
+        async function resolveAmbiguousNode(nodeId, action) {
+            try {
+                const res = await fetch(`/api/node/${action}${qs}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ node_id: parseInt(nodeId) })
+                });
+                const responseData = await res.json();
+                if (responseData.success) {
+                    loadBackendData();
+                } else {
+                    console.error("Action Error:", responseData.error);
+                    alert("Database fault: " + responseData.error);
+                }
+            } catch (e) { console.error("API Transmission Fault:", e); }
+        }
+
+        function renderTopology(viewMode) {
+            currentViewMode = viewMode;
+            const { status, data, dashData } = globalData;
+            const gwIp = status.resolved_gateway;
+            const ipMap = {}, macMap = {}, vendorMap = {}, categoryMap = {}, marketSegmentMap = {}, vlanMap = {}, lastSeenMap = {}, sysDescrMap = {}, sourceMap = {}, ssidMap = {}, virtualMap = {}, osMap = {}, weldMap = {}, httpHeaderMap = {};
+
+            if (dashData.endpoint_ledger) {
+                dashData.endpoint_ledger.forEach(row => {
+                    if (row.node_id) {
+                        const nid = row.node_id.toString();
+                        if (row.ip_address) ipMap[nid] = row.ip_address;
+                        if (row.mac_address) macMap[nid] = row.mac_address;
+                        if (row.vendor) vendorMap[nid] = row.vendor;
+                        if (row.category) categoryMap[nid] = row.category;
+                        if (row.market_segment) marketSegmentMap[nid] = row.market_segment;
+                        if (row.vlan_id) vlanMap[nid] = row.vlan_id;
+                        if (row.last_seen) lastSeenMap[nid] = row.last_seen;
+                        if (row.snmp_sysdescr) sysDescrMap[nid] = row.snmp_sysdescr;
+                        if (row.discovery_source) sourceMap[nid] = row.discovery_source;
+                        if (row.wireless_ssid) ssidMap[nid] = row.wireless_ssid;
+                        if (row.is_virtual !== undefined) virtualMap[nid] = row.is_virtual ? 'Yes' : 'No';
+                        if (row.os_family) osMap[nid] = row.os_family;
+                        if (row.weld_confidence) weldMap[nid] = row.weld_confidence;
+                        if (row.http_header) httpHeaderMap[nid] = row.http_header;
+                    }
+                });
+            }
+
+            const clientCounts = data.client_counts || {};
+            const clientMapping = data.client_mapping || {};
+            const nodeTypes = {};
+            data.nodes.forEach(n => { nodeTypes[n.id.toString()] = n.device_type; });
+
+            const unmanagedParentMap = {};
+            data.topology_edges.forEach(e => {
+                if (e.source_node_id && e.target_node_id) {
+                    let src = e.source_node_id.toString();
+                    let tgt = e.target_node_id.toString();
+                    
+                    if (nodeTypes[src] === 'Unmanaged Switch' && ['Switch', 'Router'].includes(nodeTypes[tgt])) unmanagedParentMap[src] = tgt;
+                    if (nodeTypes[tgt] === 'Unmanaged Switch' && ['Switch', 'Router'].includes(nodeTypes[src])) unmanagedParentMap[tgt] = src;
+                }
+            });
+
+            const elements = [];
+            const infraNodes = new Set();
+            const validTypes = ['Router', 'Switch', 'Switch / WAP', 'Access Point', 'Unmanaged Switch', 'Smart Switch', 'Smart Switch (Unverified)', 'Server', 'Docker Host', 'Printer'];
+
+            const getRank = (type) => {
+                if (type === 'Router') return 1;
+                if (type === 'Switch') return 2;
+                if (type === 'Smart Switch') return 2.5;
+                if (type === 'Smart Switch (Unverified)') return 2.5;
+                if (type === 'Switch / WAP') return 3;
+                if (type === 'Unmanaged Switch') return 4;
+                if (type === 'Access Point') return 5;
+                if (type === 'Server') return 5.5;
+                if (type === 'Docker Host') return 5.7;
+                if (type === 'Printer') return 5.8;
+                return 6;
+            };
+
+            function pushInfraNode(n) {
+                let nodeClass = 'switch';
+                if (n.device_type === 'Router') {
+                    nodeClass = 'router';
+                    if (gwIp) ipMap[n.id.toString()] = gwIp;
+                }
+                else if (n.device_type === 'Access Point') nodeClass = 'ap';
+                else if (n.device_type === 'Unmanaged Switch') nodeClass = 'unmanaged';
+                else if (n.device_type === 'Server') nodeClass = 'server';
+                else if (n.device_type === 'Docker Host') nodeClass = 'docker-host';
+                else if (n.device_type === 'Printer') nodeClass = 'printer';
+                else if (n.device_type === 'Smart Switch') nodeClass = 'smart-switch';
+                else if (n.device_type === 'Smart Switch (Unverified)') nodeClass = 'smart-switch-unverified';
+
+                if (n.weld_confidence === 50) nodeClass += ' ambiguous-node';
+
+                // ORPHAN-1 (2026-09-21): a node with a real, previously-
+                // confirmed device classification but genuinely NO
+                // location signal at all (no IP anywhere in ipMap, not a
+                // Router -- routers get a gwIp fallback a few lines up)
+                // is a ghost: the physical device is gone and nothing
+                // ever claimed its slot. The backend purges these after
+                // 12 hours (inference_engine.py's run_orphan_node_sweep),
+                // but during that window it should read as an obvious
+                // problem, not a normal-looking node -- excluded for
+                // virtual (is_virtual) nodes, which are dark matter/WAP-1
+                // pseudo-nodes with their own separate lifecycle and are
+                // SUPPOSED to look like inferred placeholders.
+                if (n.device_type !== 'Router' && virtualMap[n.id.toString()] !== 'Yes' && !ipMap[n.id.toString()]) {
+                    nodeClass += ' orphaned-node';
+                }
+
+                const nodeIp = ipMap[n.id.toString()] || n.ip || 'Unknown';
+                const realHostname = (n.hostname && !looksLikeMac(n.hostname)) ? n.hostname : null;
+                let displayLabel = labelMode === 'hostname' ? (realHostname || nodeIp) : (nodeIp || realHostname || 'Unknown');
+                // Detail-panel IP field: always the actual resolved IP,
+                // independent of which label mode is showing on the graph
+                // itself -- toggling the graph label must never make this
+                // field lie about the device's real address.
+                let tooltipIp = nodeIp;
+
+                if (n.device_type === 'Unmanaged Switch') {
+                    const parentId = unmanagedParentMap[n.id.toString()];
+                    const parentIp = parentId ? ipMap[parentId] : null;
+
+                    if (n.hostname === 'Orphaned Endpoints') {
+                        displayLabel = 'Orphaned Endpoints';
+                        tooltipIp = 'Stale / Sleeping Devices';
+                    } else if (parentIp && parentIp.includes('.')) {
+                        const octets = parentIp.split('.');
+                        const inferredSegment = `${octets[0]}.${octets[1]}.${octets[2]}.0`;
+                        displayLabel = (labelMode === 'hostname' && realHostname) ? realHostname : inferredSegment;
+                        tooltipIp = `${inferredSegment}/24 (Inferred Segment)`;
+                    } else {
+                        displayLabel = (labelMode === 'hostname' && realHostname) ? realHostname : 'Isolated L2 Segment';
+                        tooltipIp = 'Isolated L2 Segment';
+                    }
+                }
+
+                const clientCount = clientCounts[n.id.toString()] || 0;
+                // A Server/Docker Host is a switch-port leaf itself, not
+                // something with its own connected clients in the
+                // topology sense -- unlike every other infra type here
+                // (switches, APs, etc.), so this line is just noise for
+                // either.
+                if (n.device_type !== 'Server' && n.device_type !== 'Docker Host' && n.device_type !== 'Printer') {
+                    displayLabel += `\nClients: ${clientCount}`;
+                }
+
+                elements.push({
+                    data: { 
+                        id: n.id.toString(), 
+                        label: displayLabel,
+                        raw_hostname: realHostname || 'Unknown Hostname',
+                        raw_ip: tooltipIp,
+                        raw_mac: macMap[n.id.toString()] || (n.device_type === 'Unmanaged Switch' ? 'Opaque Layer 2 Bridge' : 'Unknown'),
+                        raw_vendor: vendorMap[n.id.toString()] || (n.device_type === 'Unmanaged Switch' ? 'N/A' : 'Unknown'),
+                        raw_category: categoryMap[n.id.toString()] || null,
+                        raw_market_segment: marketSegmentMap[n.id.toString()] || null,
+                        raw_type: n.device_type,
+                        raw_os: osMap[n.id.toString()] || n.os_family || 'N/A',
+                        raw_weld: weldMap[n.id.toString()] || n.weld_confidence ? `${weldMap[n.id.toString()] || n.weld_confidence}%` : 'N/A',
+                        raw_clients: clientCount,
+                        raw_vlan: vlanMap[n.id.toString()] || 'N/A',
+                        raw_last_seen: lastSeenMap[n.id.toString()] || 'N/A',
+                        raw_sysdescr: sysDescrMap[n.id.toString()] || 'N/A',
+                        raw_source: sourceMap[n.id.toString()] || 'N/A',
+                        raw_ssid: ssidMap[n.id.toString()] || 'N/A',
+                        raw_virtual: virtualMap[n.id.toString()] || 'No',
+                        raw_http_header: httpHeaderMap[n.id.toString()] || null,
+                        web_url: httpHeaderMap[n.id.toString()] ? `${httpHeaderMap[n.id.toString()].split(' | ')[0]}://${tooltipIp}` : null
+                    },
+                    classes: nodeClass
+                });
+                infraNodes.add(n.id.toString());
+            }
+
+            let dynamicLayout;
+
+            if (viewMode === 'backbone') {
+                document.getElementById('title-overlay').innerHTML = `
+                    <h2 style="margin:0; text-transform: uppercase; letter-spacing: 2px; color: #64748b;">Infrastructure Backbone</h2>
+                    <p style="margin: 4px 0 0 0; font-size: 10px;">LLDP / CDP Verified Topology</p>
+                `;
+                document.getElementById('btn-back').classList.add('hidden');
+
+                data.nodes.forEach(n => {
+                    if (validTypes.includes(n.device_type)) {
+                        pushInfraNode(n);
+                    }
+                });
+
+                data.topology_edges.forEach(e => {
+                    let src = e.source_node_id.toString();
+                    let tgt = e.target_node_id.toString();
+
+                    if (infraNodes.has(src) && infraNodes.has(tgt)) {
+                        let isFlipped = false;
+                        if (getRank(nodeTypes[src]) > getRank(nodeTypes[tgt])) {
+                            let temp = src; src = tgt; tgt = temp; isFlipped = true;
+                        }
+
+                        let uniquePortNames = [...new Set(e.port_names || e.ports || [])];
+                        let srcPortLabel = uniquePortNames.length > 0 ? (isFlipped && uniquePortNames.length > 1 ? uniquePortNames[1] : uniquePortNames[0]) : '';
+                        let tgtPortLabel = uniquePortNames.length > 0 ? (isFlipped && uniquePortNames.length > 1 ? uniquePortNames[0] : (uniquePortNames[1] || '')) : '';
+
+                        let uniqueSpeeds = [...new Set(e.speeds || [])];
+                        let srcSpeed = uniqueSpeeds.length > 0 ? uniqueSpeeds[0] : 'Unknown';
+                        let speedColor = getSpeedColor(srcSpeed);
+
+                        let edgeClasses = e.is_ambiguous ? 'ambiguous' : '';
+
+                        elements.push({ data: { source: src, target: tgt, srcPort: srcPortLabel, tgtPort: tgtPortLabel, speedColor: speedColor, raw_speed: srcSpeed }, classes: edgeClasses });
+                    }
+                });
+
+                // Server/Docker Host/Printer nodes have no
+                // infrastructure_links row -- that table is switch-to-
+                // switch/router LLDP/CDP data only, never a leaf host's
+                // own connection. Their real port/speed lives in
+                // client_mapping instead, the same FDB-derived per-port
+                // data the drill-down view (below, the `else` branch)
+                // already uses for every other leaf device -- synthesize
+                // a backbone edge from it here too, or these nodes would
+                // render as disconnected islands despite now being shown
+                // directly on the backbone graph.
+                //
+                // Deliberately NO fallback for a device with no
+                // client_mapping entry (e.g. only ever seen in the
+                // router's own ARP cache). An ARP entry proves L3
+                // reachability -- the router resolved this IP's MAC --
+                // NOT a physical/L2 path: the device could be behind any
+                // number of intermediate switches and still show up
+                // there. A prior version of this code drew a router
+                // edge in that case; caught live as a real bug, reverted
+                // -- that's a confident, specific, FALSE topology claim
+                // ("directly connected to the router"), strictly worse
+                // than an honestly-floating node showing no claim at
+                // all. Same discipline this codebase already applies
+                // everywhere else (run_arp_confirmed_weld_pass()'s own
+                // docstring, _annotate_subnet_and_primary's subnet
+                // placement being a labeled "guess") -- never infer
+                // physical topology from L3-only data.
+                data.nodes.forEach(n => {
+                    if (n.device_type !== 'Server' && n.device_type !== 'Docker Host' && n.device_type !== 'Printer') return;
+                    const nid = n.id.toString();
+                    if (!infraNodes.has(nid)) return;
+                    const mac = macMap[nid];
+                    const mapping = mac ? clientMapping[mac.toLowerCase()] : null;
+                    if (!mapping || !infraNodes.has(mapping.parent_node_id)) return;
+
+                    let src = mapping.parent_node_id, tgt = nid, isFlipped = false;
+                    if (getRank(nodeTypes[src]) > getRank(nodeTypes[tgt])) {
+                        const temp = src; src = tgt; tgt = temp; isFlipped = true;
+                    }
+                    const portLabel = mapping.port_name || mapping.port || '?';
+                    const speed = mapping.link_speed || 'Unknown';
+
+                    elements.push({
+                        data: {
+                            source: src, target: tgt,
+                            srcPort: isFlipped ? '' : portLabel, tgtPort: isFlipped ? portLabel : '',
+                            speedColor: getSpeedColor(speed), raw_speed: speed,
+                        },
+                    });
+                });
+
+                dynamicLayout = { name: 'dagre', rankDir: 'TB', nodeSep: 60, rankSep: 80, padding: 50, animate: true };
+
+            } else {
+                document.getElementById('title-overlay').innerHTML = `
+                    <h2 style="margin:0; text-transform: uppercase; letter-spacing: 2px; color: #22c55e;">Node Inspection</h2>
+                    <p style="margin: 4px 0 0 0; font-size: 10px;">Connected Endpoints</p>
+                `;
+                document.getElementById('btn-back').classList.remove('hidden');
+
+                const targetNode = data.nodes.find(n => n.id.toString() === viewMode);
+                if (targetNode) {
+                    pushInfraNode(targetNode);
+                    const clientNodes = {};
+                    dashData.endpoint_ledger.forEach(client => {
+                        let mac = client.mac_address ? client.mac_address.toLowerCase() : '';
+                        let mapping = clientMapping[mac];
+                        
+                        if (mapping && mapping.parent_node_id === viewMode) {
+                            let cid = client.node_id ? client.node_id.toString() : 'client_' + mac;
+                            if (!clientNodes[cid]) {
+                                clientNodes[cid] = { ...client, ip_list: new Set(), port_name: mapping.port_name || mapping.port || '?', link_speed: mapping.link_speed || 'Unknown' };
+                            }
+                            if (client.ip_address) clientNodes[cid].ip_list.add(client.ip_address);
+                        }
+                    });
+
+                    Object.values(clientNodes).forEach(client => {
+                        let ips = Array.from(client.ip_list).filter(ip => ip);
+                        ips.sort((a, b) => (a.startsWith('169.254') && !b.startsWith('169.254')) ? 1 : -1);
+
+                        let displayIp = ips.length > 0 ? ips[0] : 'No IP';
+                        let fullIpList = ips.join(', ');
+                        let speedColor = getSpeedColor(client.link_speed);
+                        const realClientHostname = (client.hostname && !looksLikeMac(client.hostname)) ? client.hostname : null;
+                        let displayName = labelMode === 'hostname' ? (realClientHostname || displayIp) : displayIp;
+
+                        let cid = client.node_id ? client.node_id.toString() : 'client_' + client.mac_address.toLowerCase();
+
+                        let clientClass = 'client';
+                        if (client.device_type === 'Smart Switch') clientClass = 'smart-switch';
+                        else if (client.device_type === 'Smart Switch (Unverified)') clientClass = 'smart-switch-unverified';
+
+                        elements.push({
+                            data: {
+                                id: cid,
+                                label: displayName + `\n[${client.port_name}]`,
+                                raw_hostname: realClientHostname || 'Unknown Hostname',
+                                raw_ip: fullIpList,
+                                raw_mac: client.mac_address || 'Unknown',
+                                raw_vendor: client.vendor || 'Unknown',
+                                raw_category: client.category || null,
+                                raw_market_segment: client.market_segment || null,
+                                raw_type: client.device_type || 'Endpoint',
+                                raw_os: client.os_family || 'N/A',
+                                raw_weld: client.weld_confidence ? `${client.weld_confidence}%` : 'N/A',
+                                raw_clients: 'N/A',
+                                raw_vlan: client.vlan_id || 'N/A',
+                                raw_last_seen: client.last_seen || 'N/A',
+                                raw_sysdescr: client.snmp_sysdescr || 'N/A',
+                                raw_source: client.discovery_source || 'N/A',
+                                raw_ssid: client.wireless_ssid || 'N/A',
+                                raw_virtual: client.is_virtual ? 'Yes' : 'No',
+                                // WEB-1: set only when web_probe.py actually found something on
+                                // 443/80 for this IP -- absence means "nothing found (yet)", not
+                                // necessarily "definitely no web server", so the menu item below
+                                // only appears when this is truthy, never as a disabled option.
+                                raw_http_header: client.http_header || null,
+                                web_url: client.http_header ? `${client.http_header.split(' | ')[0]}://${displayIp}` : null
+                            },
+                            classes: clientClass
+                        });
+                        elements.push({ data: { source: viewMode, target: cid, srcPort: client.port_name, tgtPort: '', speedColor: speedColor, raw_speed: client.link_speed } });
+                    });
+                }
+                dynamicLayout = { name: 'cose', fit: true, padding: 50, numIter: 1000, animate: true };
+            }
+
+            if (cy) { cy.destroy(); }
+
+            // Cytoscape's own style API takes literal colour values, not
+            // CSS custom properties -- it never re-reads theme.css, so
+            // these two have to be picked here, at build time, matching
+            // whatever getSpeedColor() above just decided for this theme.
+            const light = isLightTheme();
+            const labelColor = light ? '#1e293b' : '#cbd5e1';
+            const labelBg = light ? '#f1f5f9' : '#0f172a';
+
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                elements: elements,
+                style: [
+                    { selector: 'node', style: { 'label': 'data(label)', 'color': labelColor, 'text-valign': 'center', 'text-margin-y': 10, 'font-size': '10px', 'font-weight': 'bold', 'text-background-color': labelBg, 'text-background-opacity': 0.8, 'text-background-padding': '2px', 'text-wrap': 'wrap' }},
+                    { selector: 'node.router', style: { 'background-color': '#f59e0b', 'width': 45, 'height': 45, 'shape': 'octagon', 'border-width': 3, 'border-color': '#fbbf24' } },
+                    { selector: 'node.switch', style: { 'background-color': '#3b82f6', 'width': 45, 'height': 45, 'shape': 'rectangle' } },
+                    { selector: 'node.ap', style: { 'background-color': '#06b6d4', 'shape': 'triangle', 'width': 45, 'height': 45 } },
+                    { selector: 'node.unmanaged', style: { 'background-color': '#10b981', 'width': 45, 'height': 45, 'shape': 'diamond' } },
+                    { selector: 'node.smart-switch', style: { 'background-color': '#a855f7', 'width': 45, 'height': 45, 'shape': 'hexagon', 'border-width': 2, 'border-color': '#c084fc' } },
+                    { selector: 'node.smart-switch-unverified', style: { 'background-color': '#a855f7', 'width': 45, 'height': 45, 'shape': 'hexagon', 'border-width': 2, 'border-color': '#c084fc', 'opacity': 0.5 } },
+                    { selector: 'node.server', style: { 'background-color': '#6366f1', 'width': 45, 'height': 45, 'shape': 'round-rectangle', 'border-width': 2, 'border-color': '#818cf8' } },
+                    { selector: 'node.docker-host', style: { 'background-color': '#a855f7', 'width': 45, 'height': 45, 'shape': 'round-rectangle', 'border-width': 2, 'border-color': '#d8b4fe' } },
+                    { selector: 'node.printer', style: { 'background-color': '#14b8a6', 'width': 45, 'height': 45, 'shape': 'round-rectangle', 'border-width': 2, 'border-color': '#5eead4' } },
+                    { selector: 'node.client', style: { 'background-color': '#22c55e', 'width': 30, 'height': 30, 'shape': 'ellipse' } },
+                    { selector: '.ambiguous-node', style: { 'border-width': 3, 'border-style': 'dashed', 'border-color': '#f59e0b' } },
+                    // ORPHAN-1: red, not the amber used for ambiguous/
+                    // unverified inferences -- this isn't a weaker guess,
+                    // it's a node with literally zero current location
+                    // data, pending automatic removal.
+                    { selector: '.orphaned-node', style: { 'border-width': 4, 'border-style': 'dashed', 'border-color': '#ef4444', 'background-color': '#7f1d1d' } },
+                    { selector: 'edge', style: { 'width': 2, 'line-color': 'data(speedColor)', 'curve-style': 'bezier', 'target-arrow-shape': 'none', 'source-label': 'data(srcPort)', 'target-label': 'data(tgtPort)', 'source-text-offset': 30, 'target-text-offset': 30, 'color': labelColor, 'font-size': '9px', 'font-weight': 'bold', 'text-background-color': labelBg, 'text-background-opacity': 0.9, 'text-background-padding': '2px' }},
+                    { selector: 'edge.ambiguous', style: { 'line-style': 'dashed', 'line-color': 'data(speedColor)', 'width': 3, 'target-arrow-shape': 'none' }},
+                    // VLAN-4 highlight states -- see applyVlanFilter(). vlan-match is an
+                    // exact, confirmed single-VLAN client; vlan-trunk-path is a weaker
+                    // "carries/leads to this VLAN, but shares the link with others" signal;
+                    // vlan-dim is everything unrelated to the current selection.
+                    { selector: 'node.vlan-match', style: { 'border-width': 4, 'border-color': '#ec4899', 'border-style': 'solid' } },
+                    { selector: 'node.vlan-trunk-path', style: { 'border-width': 3, 'border-color': '#ec4899', 'border-style': 'dashed' } },
+                    { selector: 'edge.vlan-trunk-path', style: { 'line-color': '#ec4899', 'width': 3 } },
+                    { selector: '.vlan-dim', style: { 'opacity': 0.15 } }
+                ],
+                layout: dynamicLayout
+            });
+            
+            // WEB-1: "Open Web Page" only appears for a node once web_probe.py
+            // has actually found something on 443/80 for it (ele.data('web_url')
+            // set server-side, see server.py's graph endpoints) -- cxtmenu takes
+            // a function here specifically so the item can come and go per
+            // element rather than always showing and failing silently.
+            const openWebPageCommand = function(ele) {
+                const url = ele.data('web_url');
+                return url ? [{ content: 'Open Web Page', contentStyle: {fontWeight: 'bold', fontSize: '12px'}, select: function(){ window.open(url, '_blank', 'noopener'); } }] : [];
+            };
+
+            cy.cxtmenu({
+                selector: 'node.ambiguous-node',
+                commands: function(ele) {
+                    return [
+                        { content: 'Inspect Device', contentStyle: {fontWeight: 'bold', fontSize: '12px'}, select: function(ele){ window.location.href = `device.html?id=${ele.id()}${isArchiveMode ? '&archive='+encodeURIComponent(archiveParam) : ''}`; } },
+                        { content: 'Verify 100%', contentStyle: {fontWeight: 'bold', fontSize: '12px'}, select: function(ele){ resolveAmbiguousNode(ele.id(), 'verify'); } },
+                        { content: 'Does Not Exist', contentStyle: {fontWeight: 'bold', fontSize: '12px'}, select: function(ele){ resolveAmbiguousNode(ele.id(), 'remove'); } },
+                        ...openWebPageCommand(ele)
+                    ];
+                }
+            });
+
+            cy.cxtmenu({
+                selector: 'node:not(.ambiguous-node)',
+                commands: function(ele) {
+                    return [
+                        { content: 'Inspect Device', contentStyle: {fontWeight: 'bold', fontSize: '12px'}, select: function(ele){ window.location.href = `device.html?id=${ele.id()}${isArchiveMode ? '&archive='+encodeURIComponent(archiveParam) : ''}`; } },
+                        ...openWebPageCommand(ele)
+                    ];
+                }
+            });
+
+            cy.on('cxttapstart', function() {
+                isContextMenuOpen = true;
+                DeviceTooltip.hide();
+            });
+
+            cy.on('cxttapend', function() {
+                setTimeout(() => { isContextMenuOpen = false; }, 100);
+            });
+
+            cy.on('layoutstop', function() {
+                if (currentViewMode === 'backbone') {
+                    // Dagre's own built-in fit already picked the zoom level
+                    // and horizontally-centered pan -- keep both exactly as
+                    // computed, just shift vertically so the top of the
+                    // graph sits near the top of the pane instead of the
+                    // middle. Cytoscape's render position = model position
+                    // * zoom + pan, so solving for the desired top-of-pane
+                    // offset only requires adjusting pan.y.
+                    const topPadding = 40;
+                    const bb = cy.elements().boundingBox();
+                    const zoom = cy.zoom();
+                    cy.pan({ x: cy.pan().x, y: topPadding - (bb.y1 * zoom) });
+                } else if (cy.zoom() > 1.25) {
+                    cy.zoom(1.25); cy.center();
+                }
+            });
+
+            cy.on('mouseover', 'node', function(evt) {
+                if (isContextMenuOpen) return;
+
+                const d = evt.target.data();
+                let warningBanner = "";
+
+                if (d.raw_type === 'Unmanaged Switch' && d.raw_mac === 'Opaque Layer 2 Bridge') {
+                    warningBanner = `<div class="bg-amber-900/50 text-amber-400 border border-amber-500/50 p-1.5 mb-2 text-[9px] uppercase tracking-wider rounded">Ambiguous Node: Hardware boundary obscured by downstream device reporting.</div>`;
+                }
+
+                const x = evt.originalEvent ? evt.originalEvent.clientX : 0;
+                const y = evt.originalEvent ? evt.originalEvent.clientY : 0;
+                const tooltipData = {
+                    hostname: d.raw_hostname, type: d.raw_type,
+                    ip: d.raw_ip, mac: d.raw_mac, vlan: d.raw_vlan, vendor: d.raw_vendor,
+                    os: d.raw_os, ssid: d.raw_ssid, virtual: d.raw_virtual, source: d.raw_source,
+                    last_seen: d.raw_last_seen, weld: d.raw_weld,
+                    sysdescr: d.raw_sysdescr, warningBanner, footerText: 'Right-Click to Inspect',
+                };
+                // A Server/Docker Host is a switch-port leaf itself, not
+                // something with its own connected clients -- same
+                // reasoning as the on-graph label above, omitted here
+                // too rather than always showing "CLIENTS: 0".
+                if (d.raw_type !== 'Server' && d.raw_type !== 'Docker Host' && d.raw_type !== 'Printer') tooltipData.clients = d.raw_clients;
+                // Premium-tier data (OUI-2/3/4) -- most devices have none
+                // (most accounts aren't entitled, and even entitled ones
+                // often haven't resolved every OUI yet), so these are
+                // only added when present rather than always shown as a
+                // blank "N/A" row.
+                if (d.raw_category) tooltipData.category = d.raw_category;
+                if (d.raw_market_segment) tooltipData.market_segment = d.raw_market_segment;
+                if (d.raw_http_header) tooltipData.http_header = d.raw_http_header;
+                DeviceTooltip.show(x, y, tooltipData);
+            });
+
+            cy.on('mousemove', 'node', function(evt) {
+                if (isContextMenuOpen) { DeviceTooltip.hide(); return; }
+                if (evt.originalEvent) DeviceTooltip.move(evt.originalEvent.clientX, evt.originalEvent.clientY);
+            });
+
+            cy.on('mouseout', 'node', function(evt) { DeviceTooltip.hide(); });
+
+            cy.on('tap', 'node', function(evt) {
+                const n = evt.target;
+                if (currentViewMode === 'backbone' && !n.hasClass('client')) renderTopology(n.data('id'));
+            });
+
+            applyVlanFilter();
+        }
+        
+        function loadBackendData() {
+            Promise.all([
+                fetch('/api/status' + qs),
+                fetch('/api/topology' + qs),
+                fetch('/api/dashboard_data' + qs),
+                fetch('/api/vlans' + qs)
+            ])
+            .then(responses => Promise.all(responses.map(r => r.json())))
+            .then(([status, data, dashData, vlansRes]) => {
+                globalData = { status, data, dashData };
+                populateVlanFilterOptions(vlansRes.vlans);
+                // SPARSE-1 (2026-09-04): a simple/agnostic network with no
+                // SNMP anywhere has nothing to show in backbone view except
+                // the router itself -- every real device is a plain
+                // 'Endpoint', excluded from validTypes entirely, so the
+                // backbone graph was just one lonely octagon. Below a
+                // small infra-node count, skip backbone mode and go
+                // straight to the router's own Node Inspection view
+                // instead -- same radial/cose layout and endpoint_ledger
+                // logic already used when a user clicks into any node,
+                // just auto-selected so there's something to look at.
+                const infraTypesForCount = ['Router', 'Switch', 'Switch / WAP', 'Access Point', 'Unmanaged Switch', 'Smart Switch', 'Smart Switch (Unverified)', 'Server', 'Docker Host', 'Printer'];
+                const infraNodeCount = data.nodes.filter(n => infraTypesForCount.includes(n.device_type)).length;
+                const routerNode = data.nodes.find(n => n.device_type === 'Router');
+                if (infraNodeCount < 3 && routerNode) {
+                    renderTopology(routerNode.id.toString());
+                } else {
+                    renderTopology('backbone');
+                }
+            })
+            .catch(err => console.error("Graph Render Error:", err));
+        }
+
+        // Graph UI has no auto-refresh by default -- rebuilding the graph
+        // resets the view to 'backbone' and drops any drill-down, so this
+        // is opt-in via the dropdown rather than forced on, unlike the
+        // Devices page's fixed interval. Choice is remembered per-browser.
+        let autoRefreshTimer = null;
+        function applyAutoRefreshInterval(ms) {
+            if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+            if (ms > 0) autoRefreshTimer = setInterval(loadBackendData, ms);
+        }
+        const autoRefreshSelect = document.getElementById('autorefresh-select');
+        let savedAutoRefreshMs = 0;
+        try { savedAutoRefreshMs = parseInt(localStorage.getItem('netlanvas_graph_autorefresh_ms'), 10) || 0; } catch (e) {}
+        autoRefreshSelect.value = String(savedAutoRefreshMs);
+        applyAutoRefreshInterval(savedAutoRefreshMs);
+        autoRefreshSelect.addEventListener('change', () => {
+            const ms = parseInt(autoRefreshSelect.value, 10) || 0;
+            applyAutoRefreshInterval(ms);
+            try { localStorage.setItem('netlanvas_graph_autorefresh_ms', String(ms)); } catch (e) {}
+        });
+
+        const labelModeSelect = document.getElementById('label-mode-select');
+        labelModeSelect.value = labelMode;
+        labelModeSelect.addEventListener('change', () => {
+            labelMode = labelModeSelect.value;
+            try { localStorage.setItem('netlanvas_graph_label_mode', labelMode); } catch (e) {}
+            // Rebuilds from globalData (already cached from the last fetch) --
+            // no need to hit the API again just to relabel the same nodes.
+            if (cy) renderTopology(currentViewMode);
+        });
+
+        // theme.js applies data-theme to <html> and re-themes the Tailwind
+        // chrome around the canvas automatically (it's remapped via CSS
+        // variables), but the Cytoscape graph itself is built from literal
+        // colour values baked in at renderTopology() time -- Cytoscape's
+        // style API doesn't read CSS variables, so toggling the theme
+        // elsewhere (Settings, a different tab) needs an explicit rebuild
+        // here to pick the other theme's label/edge colours.
+        window.addEventListener('storage', function (e) {
+            if (e.key === 'netlanvas_ui_theme' && cy) renderTopology(currentViewMode);
+        });
+
+        loadBackendData();
+    </script>
+</body>
+</html>

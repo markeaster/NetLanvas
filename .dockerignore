@@ -1,0 +1,42 @@
+# Git Repository Data
+.git
+.gitignore
+
+# Python Ephemera
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables & Secrets
+.env
+.registry.env
+.registry.env.example
+
+# Runtime Databases & Local State (Prevent baking into image layers)
+db/*.db
+db/*.db-wal
+db/*.db-shm
+db/archives/
+db/oui.txt
+config/settings.yaml
+
+# TLS keypair — must never be baked into an image layer
+tls/
+
+# Logs & Temporary Execution Files
+tmp/
+logs/
+*.log
+*.log.*
+
+# Artifacts & Diagnostics
+*.bak
+source.txt
+.lgd-nfy0
+
+# Host-side Deployment & Maintenance Scripts
+git_*.sh
+rebuild*.sh
+fix_*.sh
+extract_source.sh
+build_multiarch.sh

@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Alerts</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="vendor/qrcode.min.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+        .severity-info { border-color: #3b82f6; }
+        .severity-low { border-color: #22c55e; }
+        .severity-medium { border-color: #eab308; }
+        .severity-high { border-color: #f97316; }
+        .severity-critical { border-color: #ef4444; }
+        .severity-badge-info { background: rgba(59,130,246,0.15); color: #60a5fa; }
+        .severity-badge-low { background: rgba(34,197,94,0.15); color: #4ade80; }
+        .severity-badge-medium { background: rgba(234,179,8,0.15); color: #facc15; }
+        .severity-badge-high { background: rgba(249,115,22,0.15); color: #fb923c; }
+        .severity-badge-critical { background: rgba(239,68,68,0.15); color: #f87171; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+    <main class="w-[90vw] mx-auto p-8">
+        <header class="mb-6 pb-4 border-b border-gray-800 flex justify-between items-end">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-200 tracking-widest uppercase">Alerts</h1>
+                <p class="text-xs text-cyan-500 font-mono mt-1">Device state changes, security findings, and how you're notified about them</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <div id="toast" class="hidden font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300"></div>
+                <button id="mark-all-read-btn" onclick="markAllRead()" class="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs font-bold font-mono py-2 px-4 rounded shadow transition uppercase tracking-wider">Mark all as read</button>
+                <button id="delete-all-btn" onclick="deleteAllFiltered()" class="bg-gray-800 hover:bg-red-900/60 border border-gray-700 hover:border-red-800 text-gray-300 hover:text-red-300 text-xs font-bold font-mono py-2 px-4 rounded shadow transition uppercase tracking-wider">Delete all</button>
+            </div>
+        </header>
+
+        <nav class="flex gap-1 mb-8 border-b border-gray-700">
+            <button id="tab-inbox-btn" onclick="showTab('inbox')" class="font-mono text-xs font-bold uppercase tracking-wider px-5 py-3 rounded-t-lg border border-b-0 -mb-px transition flex items-center gap-2">
+                Inbox
+                <span id="inbox-unread-badge" class="hidden bg-blue-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 items-center justify-center leading-none">0</span>
+            </button>
+            <button id="tab-settings-btn" onclick="showTab('settings')" class="font-mono text-xs font-bold uppercase tracking-wider px-5 py-3 rounded-t-lg border border-b-0 -mb-px transition">Notification Settings</button>
+            <button id="tab-severity-btn" onclick="showTab('severity')" class="font-mono text-xs font-bold uppercase tracking-wider px-5 py-3 rounded-t-lg border border-b-0 -mb-px transition">Severity</button>
+        </nav>
+
+        <div id="tab-inbox">
+            <div class="flex gap-3 mb-4">
+                <div>
+                    <label class="block text-cyan-500 font-mono text-[10px] uppercase tracking-wider mb-1">Status</label>
+                    <select id="filter-status" onchange="onAlertFilterChange()" class="bg-gray-900 border border-gray-600 text-gray-300 text-xs font-mono rounded p-2">
+                        <option value="all">All</option>
+                        <option value="new">New</option>
+                        <option value="acknowledged">Acknowledged</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-cyan-500 font-mono text-[10px] uppercase tracking-wider mb-1">Level</label>
+                    <select id="filter-severity" onchange="onAlertFilterChange()" class="bg-gray-900 border border-gray-600 text-gray-300 text-xs font-mono rounded p-2">
+                        <option value="all">All</option>
+                        <option value="info">Info</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-cyan-500 font-mono text-[10px] uppercase tracking-wider mb-1">Type</label>
+                    <select id="filter-type" onchange="onAlertFilterChange()" class="bg-gray-900 border border-gray-600 text-gray-300 text-xs font-mono rounded p-2">
+                        <option value="all">All</option>
+                        <option value="new_device">New device</option>
+                        <option value="device_online">Device online</option>
+                        <option value="device_offline">Device offline</option>
+                        <option value="snmp_default_community">Default SNMP community</option>
+                        <option value="snmp_default_community_resolved">Default SNMP community (resolved)</option>
+                        <option value="snmp_public_community_secondary">Public SNMP community (secondary)</option>
+                        <option value="snmp_public_community_secondary_resolved">Public SNMP community (resolved)</option>
+                    </select>
+                </div>
+            </div>
+            <div id="alert-list" class="space-y-3">
+                <div class="text-center text-cyan-500 animate-pulse font-mono w-full">Loading alerts...</div>
+            </div>
+        </div>
+
+        <section id="tab-settings" class="hidden">
+            <div class="space-y-6 max-w-2xl">
+                <!-- EMAIL -->
+                <div class="bg-gray-800 border border-gray-700 rounded p-5">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-blue-400 font-bold font-mono text-sm uppercase tracking-wider">Email Alerts</h3>
+                        <label class="flex items-center gap-2 cursor-pointer select-none">
+                            <input type="checkbox" id="email-enabled" class="sr-only peer">
+                            <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-500 relative"></div>
+                        </label>
+                    </div>
+
+                    <div id="email-fields" class="space-y-4">
+                        <div class="grid grid-cols-2 gap-3">
+                            <button type="button" id="method-relay-btn" onclick="onRelayButtonClick()" class="text-left p-3 rounded border transition">
+                                <div class="font-mono text-xs font-bold mb-1">Register &amp; go</div>
+                                <div class="text-[10px] text-cyan-500 font-mono leading-relaxed">Registering your appliance gives you zero-setup email alerts -- no mail server to configure.</div>
+                            </button>
+                            <button type="button" id="method-smtp-btn" onclick="setEmailMethod('smtp')" class="text-left p-3 rounded border transition">
+                                <div class="font-mono text-xs font-bold mb-1">Use my own SMTP server</div>
+                                <div class="text-[10px] text-cyan-500 font-mono leading-relaxed">Don't register -- I'll provide my own SMTP server credentials instead.</div>
+                            </button>
+                        </div>
+
+                        <div id="smtp-fields" class="hidden space-y-3">
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-cyan-400 font-mono text-xs mb-1">SMTP Host</label>
+                                    <input type="text" id="smtp-host" placeholder="smtp.example.com" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block w-full p-2">
+                                </div>
+                                <div>
+                                    <label class="block text-cyan-400 font-mono text-xs mb-1">Port</label>
+                                    <input type="number" id="smtp-port" value="587" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block w-full p-2">
+                                </div>
+                                <div>
+                                    <label class="block text-cyan-400 font-mono text-xs mb-1">Username</label>
+                                    <input type="text" id="smtp-username" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block w-full p-2">
+                                </div>
+                                <div>
+                                    <label class="block text-cyan-400 font-mono text-xs mb-1">Password</label>
+                                    <input type="password" id="smtp-password" placeholder="Leave blank to keep current" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block w-full p-2">
+                                </div>
+                                <div>
+                                    <label class="block text-cyan-400 font-mono text-xs mb-1">From Address</label>
+                                    <input type="text" id="smtp-from" placeholder="netlanvas@example.com" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block w-full p-2">
+                                </div>
+                                <label class="flex items-center gap-2 mt-6 cursor-pointer select-none">
+                                    <input type="checkbox" id="smtp-tls" checked class="w-4 h-4 rounded bg-gray-900 border-gray-600">
+                                    <span class="text-cyan-400 font-mono text-xs">Use STARTTLS</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-cyan-400 font-mono text-xs mb-1">Send To</label>
+                            <input type="email" id="email-to" placeholder="you@example.com" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block w-full p-2 max-w-sm">
+                        </div>
+
+                        <div>
+                            <label class="block text-cyan-400 font-mono text-xs mb-1">Minimum Severity</label>
+                            <select id="email-min-severity" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block p-2 max-w-[200px]">
+                                <option value="info">Info and above</option>
+                                <option value="low">Low and above</option>
+                                <option value="medium" selected>Medium and above</option>
+                                <option value="high">High and above</option>
+                                <option value="critical">Critical only</option>
+                            </select>
+                        </div>
+
+                        <button onclick="testEmail()" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold font-mono py-2 px-4 rounded shadow transition uppercase tracking-wider">Send test email</button>
+                    </div>
+                </div>
+
+                <!-- WEBHOOK -->
+                <div class="bg-gray-800 border border-gray-700 rounded p-5">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="flex items-center gap-2">
+                            <h3 class="text-blue-400 font-bold font-mono text-sm uppercase tracking-wider">Webhook Alerts</h3>
+                            <span class="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/20 text-amber-400">Premium</span>
+                        </div>
+                        <label class="flex items-center gap-2 cursor-pointer select-none">
+                            <input type="checkbox" id="webhook-enabled" class="sr-only peer">
+                            <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-500 relative"></div>
+                        </label>
+                    </div>
+
+                    <div id="webhook-not-entitled-notice" class="hidden text-[11px] font-mono text-amber-400 bg-amber-900/20 border border-amber-800/50 rounded p-3 mb-4">
+                        Webhook alerts are a premium feature. <a href="#" onclick="forceNavigateTop('settings.html'); return false;" class="underline hover:text-amber-300">Register &amp; subscribe</a> to unlock delivery -- you can still set this up now and it'll start working once you do.
+                    </div>
+
+                    <div id="webhook-fields" class="space-y-4">
+                        <!-- ALERT-7: ntfy is a FORMAT for the same webhook_url/
+                             webhook_enabled/webhook_min_severity config below, not
+                             a separate feature -- one click fills in a real
+                             ntfy.sh URL and flips webhook_format server-side, the
+                             raw-JSON path stays exactly as it was for anyone who
+                             wants a custom integration instead. -->
+                        <div class="bg-gray-900/60 border border-gray-700 rounded p-3">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="text-gray-300 font-mono text-xs font-bold">ntfy.sh (recommended)</span>
+                                <span id="ntfy-format-badge" class="hidden text-[9px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-green-500/20 text-green-400">Active</span>
+                            </div>
+                            <p class="text-[10px] text-cyan-500 font-mono mb-2">Push notifications straight to a phone/desktop app -- title, priority, and an icon per severity, no custom integration needed. On Android, scanning the QR code or tapping the link should open the ntfy app directly and subscribe you. This isn't reliable on iOS (or if it lands on the ntfy.sh website instead of the app) -- if that happens, open the ntfy app yourself, tap "+", and add the topic below manually.</p>
+                            <button onclick="setupNtfy()" id="ntfy-setup-btn" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold font-mono py-2 px-4 rounded shadow transition uppercase tracking-wider">Set up ntfy alerts</button>
+                            <div id="ntfy-panel" class="hidden mt-3 flex items-start gap-4">
+                                <div id="ntfy-qr" class="bg-white p-2 rounded flex-shrink-0"></div>
+                                <div class="flex-1 min-w-0 space-y-2">
+                                    <a id="ntfy-link" href="#" target="_blank" rel="noopener" class="block text-blue-400 hover:text-blue-300 font-mono text-xs break-all underline"></a>
+                                    <button onclick="copyNtfyUrl()" class="bg-gray-700 hover:bg-gray-600 text-gray-200 text-[10px] font-bold font-mono py-1.5 px-3 rounded transition uppercase tracking-wider">Copy link</button>
+                                    <div class="border-t border-gray-700 pt-2 mt-2">
+                                        <div class="text-[9px] text-gray-200 font-mono uppercase tracking-wider mb-1">Manual entry (server: ntfy.sh)</div>
+                                        <div class="flex items-center gap-2">
+                                            <code id="ntfy-manual-topic" class="text-gray-200 font-mono text-xs bg-gray-900 px-2 py-1 rounded border border-gray-700"></code>
+                                            <button onclick="copyNtfyTopic()" class="bg-gray-700 hover:bg-gray-600 text-gray-200 text-[10px] font-bold font-mono py-1.5 px-3 rounded transition uppercase tracking-wider">Copy topic</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-cyan-400 font-mono text-xs mb-1">Webhook URL</label>
+                            <p class="text-[10px] text-cyan-500 font-mono mb-2">Raw JSON payload, Ed25519-signed with this device's public key included so any receiver can verify it independently -- for a custom integration instead of ntfy. Editing this by hand switches delivery back to the raw JSON format.</p>
+                            <input type="text" id="webhook-url" placeholder="https://example.com/hook" oninput="onWebhookUrlEdited()" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block w-full p-2 max-w-lg">
+                        </div>
+                        <div>
+                            <label class="block text-cyan-400 font-mono text-xs mb-1">Minimum Severity</label>
+                            <select id="webhook-min-severity" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block p-2 max-w-[200px]">
+                                <option value="info">Info and above</option>
+                                <option value="low">Low and above</option>
+                                <option value="medium" selected>Medium and above</option>
+                                <option value="high">High and above</option>
+                                <option value="critical">Critical only</option>
+                            </select>
+                        </div>
+                        <button onclick="testWebhook()" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold font-mono py-2 px-4 rounded shadow transition uppercase tracking-wider">Send test webhook</button>
+                    </div>
+                </div>
+
+                <button onclick="saveConfig()" class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold font-mono py-2.5 px-6 rounded shadow-lg transition uppercase tracking-wider">Save Alerting Settings</button>
+            </div>
+        </section>
+
+        <section id="tab-severity" class="hidden">
+            <div class="space-y-6 max-w-2xl">
+                <div class="bg-gray-800 border border-gray-700 rounded p-5">
+                    <h3 class="text-blue-400 font-bold font-mono text-sm uppercase tracking-wider mb-1">Device Offline Severity</h3>
+                    <p class="text-cyan-500 font-mono text-xs mb-4">A device going offline is scored by its role -- a router losing connectivity usually means the whole segment lost its default gateway, which is a much bigger deal than one endpoint disappearing.</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-cyan-400 font-mono text-xs mb-1">Router</label>
+                            <select id="severity-offline-router" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block p-2 w-full">
+                                <option value="info">Info</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                                <option value="critical">Critical</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-cyan-400 font-mono text-xs mb-1">Switch / AP / Docker Host / Server / Printer</label>
+                            <select id="severity-offline-infrastructure" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block p-2 w-full">
+                                <option value="info">Info</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                                <option value="critical">Critical</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-cyan-400 font-mono text-xs mb-1">Endpoint</label>
+                            <select id="severity-offline-endpoint" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block p-2 w-full">
+                                <option value="info">Info</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                                <option value="critical">Critical</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 border border-gray-700 rounded p-5">
+                    <h3 class="text-blue-400 font-bold font-mono text-sm uppercase tracking-wider mb-1">SNMP Default-Community Exposure</h3>
+                    <p class="text-cyan-500 font-mono text-xs mb-4">Applies to any device found responding to a default SNMP community string ("public"/"private") -- whether that's its primary credential or an extra exposure alongside a real one. Unlike an offline event, this is a standing gap that persists until fixed, so it isn't split by device role.</p>
+                    <div class="max-w-[240px]">
+                        <label class="block text-cyan-400 font-mono text-xs mb-1">Severity</label>
+                        <select id="severity-snmp-exposure" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block p-2 w-full">
+                            <option value="info">Info</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                                <option value="critical">Critical</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 border border-gray-700 rounded p-5">
+                    <h3 class="text-blue-400 font-bold font-mono text-sm uppercase tracking-wider mb-1">SNMPv3 Available But Unused</h3>
+                    <p class="text-cyan-500 font-mono text-xs mb-4">Applies to any device confirmed to have a real SNMPv3 engine (its snmpEngineID answers) but is currently being managed over plaintext v2c instead -- a hardening opportunity, not an active exposure like a default community string, so this defaults lower.</p>
+                    <div class="max-w-[240px]">
+                        <label class="block text-cyan-400 font-mono text-xs mb-1">Severity</label>
+                        <select id="severity-snmp-v3-unused" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded block p-2 w-full">
+                            <option value="info">Info</option>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                                <option value="critical">Critical</option>
+                        </select>
+                    </div>
+                </div>
+
+                <button onclick="saveSeverityConfig()" class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold font-mono py-2.5 px-6 rounded shadow-lg transition uppercase tracking-wider">Save Severity Settings</button>
+            </div>
+        </section>
+    </main>
+
+    <!-- REGISTER-AND-GO NUDGE -->
+    <!-- NATIVE-16 follow-up: see settings.html's setup-modal for why
+         overflow-y-auto belongs on this outer div alone, not combined
+         with flex items-center -- same fix applied here for
+         consistency/defensive robustness, even though this card is
+         short enough that it rarely bites in practice. -->
+    <div id="register-nudge-modal" class="hidden fixed inset-0 z-50 backdrop-blur-sm overflow-y-auto" style="background-color: rgba(0, 0, 0, 0.8);">
+      <div class="min-h-full flex items-center justify-center p-4">
+        <div class="bg-gray-800 border border-gray-700 rounded-lg p-6 w-full max-w-sm shadow-2xl">
+            <h3 class="text-gray-200 font-bold font-mono text-sm uppercase tracking-widest mb-2">Registration Required</h3>
+            <p class="text-cyan-400 font-mono text-xs leading-relaxed mb-6">Zero-setup email alerts need your appliance registered to an account first -- no mail server to configure, we handle delivery for you.</p>
+            <div class="flex gap-3">
+                <button onclick="dismissRegisterNudge(true)" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold font-mono py-2.5 rounded transition uppercase tracking-wider">Register Now</button>
+                <button onclick="dismissRegisterNudge(false)" class="flex-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs font-bold font-mono py-2.5 rounded transition uppercase tracking-wider">Not Yet</button>
+            </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
+        };
+
+        // DEMO_MODE blocks every non-GET /api/* call server-side (403) --
+        // mark-read/delete would just fail with no useful feedback, so
+        // disable them client-side instead. /api/demo/stats only exists
+        // (200) when DEMO_MODE is on, 404s otherwise -- reused here purely
+        // as a cheap existence check, its actual stats aren't needed.
+        let isDemoMode = false;
+        async function detectDemoMode() {
+            try {
+                const res = await fetch('/api/demo/stats');
+                isDemoMode = res.ok;
+            } catch (e) { isDemoMode = false; }
+            if (isDemoMode) {
+                const markBtn = document.getElementById('mark-all-read-btn');
+                const delBtn = document.getElementById('delete-all-btn');
+                for (const btn of [markBtn, delBtn]) {
+                    btn.disabled = true;
+                    btn.title = 'Disabled in the public demo';
+                    btn.classList.add('opacity-40', 'cursor-not-allowed');
+                    btn.classList.remove('hover:bg-gray-700', 'hover:bg-red-900/60', 'hover:text-red-300', 'hover:border-red-800');
+                }
+            }
+        }
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300 ${type === 'success' ? 'bg-green-900/50 text-green-400 border border-green-500/50' : 'bg-red-900/50 text-red-400 border border-red-500/50'}`;
+            toast.classList.remove('hidden');
+            setTimeout(() => toast.classList.add('hidden'), 3000);
+        }
+
+        function forceNavigateTop(page) {
+            if (window.top && window.top.forceNavigate) window.top.forceNavigate(page);
+        }
+
+        function showTab(tab) {
+            document.getElementById('tab-inbox').classList.toggle('hidden', tab !== 'inbox');
+            document.getElementById('tab-settings').classList.toggle('hidden', tab !== 'settings');
+            document.getElementById('tab-severity').classList.toggle('hidden', tab !== 'severity');
+            document.getElementById('mark-all-read-btn').classList.toggle('hidden', tab !== 'inbox');
+
+            const activeClasses = ['bg-gray-900', 'border-gray-700', 'text-gray-200'];
+            const inactiveClasses = ['bg-gray-800/40', 'border-gray-800', 'text-cyan-500', 'hover:text-gray-300', 'hover:bg-gray-800'];
+            const tabs = { inbox: 'tab-inbox-btn', settings: 'tab-settings-btn', severity: 'tab-severity-btn' };
+            for (const [name, btnId] of Object.entries(tabs)) {
+                const btn = document.getElementById(btnId);
+                btn.classList.remove(...activeClasses, ...inactiveClasses);
+                btn.classList.add(...(tab === name ? activeClasses : inactiveClasses));
+            }
+
+            try { localStorage.setItem('netlanvas_alerts_tab', tab); } catch (e) {}
+        }
+
+        async function loadSeverityConfig() {
+            try {
+                const res = await fetch('/api/alerting/severity-config');
+                const data = await res.json();
+                const cfg = data.config;
+                if (!cfg) return;
+                document.getElementById('severity-offline-router').value = cfg.offline_router || 'critical';
+                document.getElementById('severity-offline-infrastructure').value = cfg.offline_infrastructure || 'high';
+                document.getElementById('severity-offline-endpoint').value = cfg.offline_endpoint || 'low';
+                document.getElementById('severity-snmp-exposure').value = cfg.snmp_exposure || 'high';
+                document.getElementById('severity-snmp-v3-unused').value = cfg.snmp_v3_unused || 'medium';
+            } catch (e) { console.error('loadSeverityConfig failed', e); }
+        }
+
+        async function saveSeverityConfig() {
+            const body = {
+                offline_router: document.getElementById('severity-offline-router').value,
+                offline_infrastructure: document.getElementById('severity-offline-infrastructure').value,
+                offline_endpoint: document.getElementById('severity-offline-endpoint').value,
+                snmp_exposure: document.getElementById('severity-snmp-exposure').value,
+                snmp_v3_unused: document.getElementById('severity-snmp-v3-unused').value,
+            };
+            const res = await fetch('/api/alerting/severity-config', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (data.error) { showToast(data.error, 'error'); return; }
+            showToast('Severity settings saved.', 'success');
+            loadSeverityConfig();
+        }
+
+        function timeAgo(iso) {
+            const then = new Date(iso.replace(' ', 'T') + 'Z');
+            const secs = Math.floor((Date.now() - then.getTime()) / 1000);
+            if (secs < 60) return 'just now';
+            if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+            if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+            return `${Math.floor(secs / 86400)}d ago`;
+        }
+
+        // created_at is stored UTC ("YYYY-MM-DD HH:MM:SS") -- rendered
+        // in the browser's own local timezone, not printed raw, since a
+        // bare UTC string read at a glance is easy to mistake for local
+        // time and be off by however many hours.
+        function formatTimestamp(iso) {
+            const then = new Date(iso.replace(' ', 'T') + 'Z');
+            return then.toLocaleString(undefined, {
+                year: 'numeric', month: 'short', day: 'numeric',
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+            });
+        }
+
+        function onAlertFilterChange() {
+            try {
+                localStorage.setItem('netlanvas_alerts_filter_status', document.getElementById('filter-status').value);
+                localStorage.setItem('netlanvas_alerts_filter_severity', document.getElementById('filter-severity').value);
+                localStorage.setItem('netlanvas_alerts_filter_type', document.getElementById('filter-type').value);
+            } catch (e) {}
+            loadAlerts();
+        }
+
+        async function loadAlerts() {
+            try {
+                const status = document.getElementById('filter-status').value;
+                const severity = document.getElementById('filter-severity').value;
+                const type = document.getElementById('filter-type').value;
+                const res = await fetch(`/api/alerts?limit=100&status=${encodeURIComponent(status)}&severity=${encodeURIComponent(severity)}&alert_type=${encodeURIComponent(type)}`);
+                const data = await res.json();
+                const list = document.getElementById('alert-list');
+
+                const badge = document.getElementById('inbox-unread-badge');
+                const unread = data.unread_count || 0;
+                badge.textContent = unread > 99 ? '99+' : String(unread);
+                badge.classList.toggle('hidden', unread === 0);
+                badge.classList.toggle('flex', unread > 0);
+
+                if (!data.alerts || data.alerts.length === 0) {
+                    const filtered = status !== 'all' || severity !== 'all' || type !== 'all';
+                    list.innerHTML = filtered
+                        ? '<div class="text-center text-gray-600 font-mono text-sm w-full py-8">No alerts match the current filter.</div>'
+                        : '<div class="text-center text-gray-600 font-mono text-sm w-full py-8">No alerts yet -- this is where device changes and security findings will show up.</div>';
+                    return;
+                }
+
+                list.innerHTML = data.alerts.map(a => `
+                    <div class="bg-gray-800 border-l-4 ${a.is_resolution ? 'severity-low' : `severity-${escapeHTML(a.severity)}`} rounded p-4 flex items-start justify-between gap-4 ${a.read_at ? 'opacity-60' : ''}">
+                        <div class="min-w-0">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded ${a.is_resolution ? 'severity-badge-low' : `severity-badge-${escapeHTML(a.severity)}`}">${a.is_resolution ? '&#10003; resolved' : escapeHTML(a.severity)}</span>
+                                <span class="text-gray-200 font-mono text-sm font-bold">${escapeHTML(a.title)}</span>
+                            </div>
+                            ${a.detail ? `<p class="text-cyan-400 font-mono text-xs">${escapeHTML(a.detail)}</p>` : ''}
+                            <p class="text-gray-200 font-mono text-[10px] mt-1">${formatTimestamp(a.created_at)} &middot; ${timeAgo(a.created_at)}</p>
+                        </div>
+                        <div class="flex-shrink-0 flex items-center gap-2">
+                            ${isDemoMode ? '' : `
+                            ${!a.read_at ? `<button onclick="markRead(${a.id})" title="Mark as read" class="p-2 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-gray-100 transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                            </button>` : ''}
+                            <button onclick="deleteAlert(${a.id})" title="Delete" class="p-2 rounded bg-gray-700 hover:bg-red-900/60 text-cyan-400 hover:text-red-300 transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
+                            `}
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                document.getElementById('alert-list').innerHTML = '<div class="text-center text-red-400 font-mono text-sm w-full py-8">Failed to load alerts.</div>';
+            }
+        }
+
+        async function markRead(id) {
+            await fetch(`/api/alerts/${id}/read`, { method: 'POST' });
+            loadAlerts();
+        }
+
+        async function deleteAlert(id) {
+            await fetch(`/api/alerts/${id}`, { method: 'DELETE' });
+            loadAlerts();
+        }
+
+        async function markAllRead() {
+            const severity = document.getElementById('filter-severity').value;
+            await fetch(`/api/alerts/mark-all-read?severity=${encodeURIComponent(severity)}`, { method: 'POST' });
+            loadAlerts();
+            showToast(severity === 'all' ? 'All alerts marked as read.' : `All ${severity} alerts marked as read.`, 'success');
+        }
+
+        async function deleteAllFiltered() {
+            const status = document.getElementById('filter-status').value;
+            const severity = document.getElementById('filter-severity').value;
+            const type = document.getElementById('filter-type').value;
+            if (status === 'all' && severity === 'all' && type === 'all') {
+                showToast('Set at least one filter before deleting all.', 'error');
+                return;
+            }
+            if (!confirm('Delete every alert matching the current filter? This cannot be undone.')) return;
+            const res = await fetch(`/api/alerts?status=${encodeURIComponent(status)}&severity=${encodeURIComponent(severity)}&alert_type=${encodeURIComponent(type)}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.error) { showToast(data.error, 'error'); return; }
+            loadAlerts();
+            if (window.top && window.top.pollAlertsBadge) window.top.pollAlertsBadge();
+            showToast(`Deleted ${data.deleted} alert${data.deleted === 1 ? '' : 's'}.`, 'success');
+        }
+
+        let currentEmailMethod = 'relay';
+        let isRegistered = false;
+
+        function setEmailMethod(method) {
+            currentEmailMethod = method;
+            document.getElementById('method-relay-btn').className = `text-left p-3 rounded border transition ${method === 'relay' ? 'border-blue-500 bg-blue-900/20' : 'border-gray-700 hover:border-gray-600'}`;
+            document.getElementById('method-smtp-btn').className = `text-left p-3 rounded border transition ${method === 'smtp' ? 'border-blue-500 bg-blue-900/20' : 'border-gray-700 hover:border-gray-600'}`;
+            document.getElementById('smtp-fields').classList.toggle('hidden', method !== 'smtp');
+        }
+
+        // "Register & go" -- if already registered, just selects relay
+        // like any other method. If not, the point of the button is
+        // registering AND going, so it can't silently do nothing: show
+        // the choice explicitly rather than a passive inline notice.
+        function onRelayButtonClick() {
+            if (isRegistered) {
+                setEmailMethod('relay');
+            } else {
+                document.getElementById('register-nudge-modal').classList.remove('hidden');
+            }
+        }
+
+        function dismissRegisterNudge(shouldRegister) {
+            document.getElementById('register-nudge-modal').classList.add('hidden');
+            if (shouldRegister) forceNavigateTop('settings.html');
+        }
+
+        let isEntitled = false;
+        let webhookFormat = 'json';
+
+        async function loadConfig() {
+            try {
+                // Top-down control state (2026-09-17): registration and
+                // entitlement are permission decisions, not page content
+                // -- index.html's bootstrapApp() already fetches both
+                // once, at load, as the single source of truth (see its
+                // own comment on window.NetLanvasAccountState). Reading
+                // that directly instead of running a second, independent
+                // pair of fetches here avoids re-deriving state the
+                // parent already has, the same principle already applied
+                // to registration status generally. Falls back to this
+                // page's own fetches only if that state genuinely isn't
+                // available (e.g. loaded before the parent's own
+                // bootstrap finished) rather than assuming "not entitled"
+                // in a race that shouldn't normally happen.
+                const parentState = window.parent && window.parent.NetLanvasAccountState;
+                if (parentState) {
+                    isRegistered = !!parentState.isRegistered;
+                    isEntitled = !!parentState.isEntitled;
+                } else {
+                    const settingsRes = await fetch('/api/settings');
+                    const settingsData = await settingsRes.json();
+                    isRegistered = (settingsData.settings || []).some(s => s.setting_key === 'IS_REGISTERED' && s.setting_value.toLowerCase() === 'true');
+                    try {
+                        const entRes = await fetch('/api/register/entitlement');
+                        const entData = await entRes.json();
+                        isEntitled = !!entData.entitled;
+                    } catch (e) { isEntitled = false; }
+                }
+                document.getElementById('webhook-not-entitled-notice').classList.toggle('hidden', isEntitled);
+
+                const res = await fetch('/api/alerting/config');
+                const data = await res.json();
+                const cfg = data.config;
+                if (!cfg) { setEmailMethod(isRegistered ? 'relay' : 'smtp'); return; }
+
+                document.getElementById('email-enabled').checked = !!cfg.email_enabled;
+                document.getElementById('email-to').value = cfg.email_to_address || '';
+                document.getElementById('email-min-severity').value = cfg.email_min_severity || 'medium';
+                document.getElementById('smtp-host').value = cfg.smtp_host || '';
+                document.getElementById('smtp-port').value = cfg.smtp_port || 587;
+                document.getElementById('smtp-username').value = cfg.smtp_username || '';
+                document.getElementById('smtp-password').placeholder = cfg.smtp_password_set ? 'Leave blank to keep current password' : 'Password';
+                document.getElementById('smtp-from').value = cfg.smtp_from_address || '';
+                document.getElementById('smtp-tls').checked = cfg.smtp_use_tls !== 0;
+                document.getElementById('webhook-enabled').checked = !!cfg.webhook_enabled;
+                document.getElementById('webhook-url').value = cfg.webhook_url || '';
+                document.getElementById('webhook-min-severity').value = cfg.webhook_min_severity || 'medium';
+                webhookFormat = cfg.webhook_format || 'json';
+                renderNtfyPanel();
+                setEmailMethod(cfg.email_delivery_method || (isRegistered ? 'relay' : 'smtp'));
+            } catch (e) {
+                setEmailMethod('smtp');
+            }
+        }
+
+        async function saveConfig(announce = true) {
+            const body = {
+                email_enabled: document.getElementById('email-enabled').checked,
+                email_delivery_method: currentEmailMethod,
+                email_min_severity: document.getElementById('email-min-severity').value,
+                email_to_address: document.getElementById('email-to').value.trim() || null,
+                smtp_host: document.getElementById('smtp-host').value.trim() || null,
+                smtp_port: parseInt(document.getElementById('smtp-port').value) || 587,
+                smtp_username: document.getElementById('smtp-username').value.trim() || null,
+                smtp_password: document.getElementById('smtp-password').value || null,
+                smtp_use_tls: document.getElementById('smtp-tls').checked,
+                smtp_from_address: document.getElementById('smtp-from').value.trim() || null,
+                webhook_enabled: document.getElementById('webhook-enabled').checked,
+                webhook_url: document.getElementById('webhook-url').value.trim() || null,
+                webhook_min_severity: document.getElementById('webhook-min-severity').value,
+                webhook_format: webhookFormat,
+            };
+            const res = await fetch('/api/alerting/config', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (data.error) { showToast(data.error, 'error'); return false; }
+            document.getElementById('smtp-password').value = '';
+            if (announce) showToast('Alerting settings saved.', 'success');
+            loadConfig();
+            return true;
+        }
+
+        // Both test buttons save first -- otherwise "test" would silently
+        // fire against whatever was last saved, not whatever's currently
+        // typed into the form, which reads as the test just not working.
+        async function testEmail() {
+            if (!(await saveConfig(false))) return;
+            showToast('Sending test email...', 'success');
+            const res = await fetch('/api/alerting/test-email', { method: 'POST' });
+            const data = await res.json();
+            showToast(data.error || 'Test email sent -- check your inbox.', data.error ? 'error' : 'success');
+        }
+
+        async function testWebhook() {
+            if (!(await saveConfig(false))) return;
+            showToast('Sending test webhook...', 'success');
+            const res = await fetch('/api/alerting/test-webhook', { method: 'POST' });
+            const data = await res.json();
+            showToast(data.error || 'Test webhook sent.', data.error ? 'error' : 'success');
+        }
+
+        // ALERT-7. Reset to the raw-JSON format the moment a human
+        // touches the URL field by hand -- a manually-edited value has
+        // no guarantee of still being the ntfy topic setupNtfy() filled
+        // in, so silently keeping webhook_format='ntfy' pointed at
+        // whatever they typed would misroute delivery with no warning.
+        function onWebhookUrlEdited() {
+            webhookFormat = 'json';
+            renderNtfyPanel();
+        }
+
+        // ALERT-7 fix: the QR code / tap link must encode ntfy's own
+        // ntfy://<host>/<topic> scheme, NOT the plain https:// delivery
+        // URL. Confirmed against ntfy's own docs -- Android's https deep
+        // linking is "brittle and limited" by design, so a scanned
+        // https:// link just opens the ntfy.sh website (which DOES show
+        // the topic's messages, easy to mistake for "it worked") rather
+        // than subscribing the native app. The https:// webhook_url
+        // itself is untouched here and stays correct for actual alert
+        // delivery (_send_webhook_ntfy() posts to ntfy's HTTP publish
+        // API, a completely separate concern from how a human subscribes
+        // their phone to receive it).
+        function ntfyDeepLink(httpsUrl) {
+            try {
+                const u = new URL(httpsUrl);
+                // ?display= sets the subscription's shown name in the app --
+                // without it, ntfy just labels the subscription with the raw
+                // (deliberately unguessable, so not exactly memorable) topic
+                // string itself. Appending window.location.hostname (this
+                // page IS being served BY the appliance being subscribed to,
+                // so it's inherently the right address to distinguish it by)
+                // rather than a bare "NetLanvas Alerts" so someone with more
+                // than one install can tell their subscriptions apart --
+                // whatever this page was actually reached at (IP or a
+                // configured DNS name), no new setting or API needed.
+                const displayName = `NetLanvas Alerts (${window.location.hostname})`;
+                return `ntfy://${u.host}${u.pathname}?display=${encodeURIComponent(displayName)}`;
+            } catch (e) {
+                return httpsUrl;
+            }
+        }
+
+        function renderNtfyPanel() {
+            const url = document.getElementById('webhook-url').value.trim();
+            const isNtfy = webhookFormat === 'ntfy' && !!url;
+            document.getElementById('ntfy-format-badge').classList.toggle('hidden', !isNtfy);
+            const panel = document.getElementById('ntfy-panel');
+            panel.classList.toggle('hidden', !isNtfy);
+            if (!isNtfy) return;
+
+            const deepLink = ntfyDeepLink(url);
+            const topic = url.split('/').filter(Boolean).pop() || '';
+
+            const link = document.getElementById('ntfy-link');
+            link.href = deepLink;
+            link.textContent = deepLink;
+
+            const qrBox = document.getElementById('ntfy-qr');
+            qrBox.innerHTML = '';
+            new QRCode(qrBox, { text: deepLink, width: 120, height: 120, colorDark: '#000000', colorLight: '#ffffff' });
+
+            // iOS's support for the ntfy:// scheme isn't documented (only
+            // Android's is) -- rather than guess, always show the raw
+            // topic as a manual fallback: open the app, tap +, paste this.
+            document.getElementById('ntfy-manual-topic').textContent = topic;
+        }
+
+        async function copyNtfyUrl() {
+            const url = document.getElementById('webhook-url').value.trim();
+            try {
+                await navigator.clipboard.writeText(url);
+                showToast('Link copied.', 'success');
+            } catch (e) {
+                showToast('Could not copy -- select and copy the link manually.', 'error');
+            }
+        }
+
+        async function copyNtfyTopic() {
+            const topic = document.getElementById('ntfy-manual-topic').textContent;
+            try {
+                await navigator.clipboard.writeText(topic);
+                showToast('Topic copied.', 'success');
+            } catch (e) {
+                showToast('Could not copy -- select and copy the topic manually.', 'error');
+            }
+        }
+
+        async function setupNtfy() {
+            const btn = document.getElementById('ntfy-setup-btn');
+            btn.disabled = true;
+            const originalText = btn.textContent;
+            btn.textContent = 'Setting up...';
+            try {
+                const res = await fetch('/api/alerting/setup-ntfy', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                document.getElementById('webhook-url').value = data.webhook_url;
+                document.getElementById('webhook-enabled').checked = true;
+                webhookFormat = 'ntfy';
+                renderNtfyPanel();
+                if (!(await saveConfig(false))) return;
+                showToast('ntfy alerts configured -- scan the QR code or tap the link to subscribe.', 'success');
+            } catch (e) {
+                showToast('Could not reach the registration backend. Please try again.', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
+        }
+
+        let initialTab = 'inbox';
+        try { initialTab = localStorage.getItem('netlanvas_alerts_tab') || 'inbox'; } catch (e) {}
+        showTab(initialTab);
+
+        try {
+            const savedStatus = localStorage.getItem('netlanvas_alerts_filter_status');
+            const savedSeverity = localStorage.getItem('netlanvas_alerts_filter_severity');
+            const savedType = localStorage.getItem('netlanvas_alerts_filter_type');
+            if (savedStatus) document.getElementById('filter-status').value = savedStatus;
+            if (savedSeverity) document.getElementById('filter-severity').value = savedSeverity;
+            if (savedType) document.getElementById('filter-type').value = savedType;
+        } catch (e) {}
+
+        fetch('/api/alerts/acknowledge', { method: 'POST' });
+        if (window.top && window.top.pollAlertsBadge) window.top.pollAlertsBadge();
+        detectDemoMode().then(loadAlerts);
+        loadConfig();
+        loadSeverityConfig();
+
+        // Auto-refresh the inbox so new alerts show up without a manual
+        // reload -- only while that tab is actually visible, so this
+        // doesn't churn the DOM (and wipe any in-progress "mark read"
+        // click) while the user's looking at Notification Settings.
+        setInterval(() => {
+            if (!document.getElementById('tab-inbox').classList.contains('hidden')) loadAlerts();
+        }, 15000);
+    </script>
+</body>
+</html>

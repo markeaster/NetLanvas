@@ -1,0 +1,29 @@
+# TLS-only. No plaintext HTTP listener — see project notes: a redirect
+# listener would still be a live plaintext socket, which defeats the
+# point of this migration. Users must connect via https:// explicitly.
+{
+	auto_https off
+}
+
+:8899 {
+	tls /etc/netlanvas-tls/server.crt /etc/netlanvas-tls/server.key
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# SAMEORIGIN, not DENY -- index.html frames its own pages
+		# (dashboard.html, links.html, settings.html, etc.) in
+		# <iframe id="content_frame">, same-origin. DENY blocks that
+		# too, not just third-party clickjacking attempts.
+		X-Frame-Options "SAMEORIGIN"
+	}
+
+	reverse_proxy netlanvas_api:8000 {
+		header_up X-Forwarded-Proto https
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -1,0 +1,110 @@
+{
+  "UI_THEME": {
+    "value": "dark",
+    "description": "UI color theme: dark or light. Applies appliance-wide, not per-browser."
+  },
+  "POLLING_MODE": {
+    "value": "time_limited",
+    "description": "continuous (always polling) or time_limited (default -- runs for POLLING_DURATION_HOURS, then pauses until manually resumed via Start Now)."
+  },
+  "POLLING_DURATION_HOURS": {
+    "value": "4",
+    "description": "How many hours a time-limited polling run lasts before pausing. Only used when POLLING_MODE is time_limited."
+  },
+  "_POLLING_ACTIVE": {
+    "value": "true",
+    "description": "Internal flag: whether the poller is currently doing work (vs. paused after a time-limited run ended)."
+  },
+  "_POLLING_STARTED_AT": {
+    "value": "",
+    "description": "Internal timestamp of the current polling run's start, used to compute when a time-limited run has elapsed."
+  },
+  "_POLLING_PAUSED_AT": {
+    "value": "",
+    "description": "Internal timestamp of when the current pause began, used to drive the Settings page's live 'Paused for HH:MM:SS' counter."
+  },
+  "SCAN_INTERFACE_OVERRIDE": {
+    "value": "",
+    "description": "Network interface name (e.g. eth2) to scope discovery to, instead of the OS's own default route. Empty = today's behavior, unaffected. For multi-homed appliances (a separate NIC for the network actually under test). Linux only for now. Takes effect on the next tick -- no restart needed."
+  },
+  "VERBOSE_LOGGING": {
+    "value": "true",
+    "description": "Enable DEBUG level logging."
+  },
+  "SNMP_COMMUNITY_STRING": {
+    "value": "public",
+    "description": "The default SNMP v2c community string used to query infrastructure."
+  },
+  "SNMP_TRY_PUBLIC_COMMUNITY": {
+    "value": "true",
+    "description": "Also try the well-known default SNMP community string 'public' if your configured strings fail. Disable on networks where this default has been intentionally removed, to avoid tripping intrusion-detection alerts for repeated default-credential attempts. Except where used for security alerting -- see SNMP_SECURITY_SCAN_PUBLIC, controlled separately."
+  },
+  "SNMP_SECURITY_SCAN_PUBLIC": {
+    "value": "true",
+    "description": "Actively check whether 'public' also works on devices that already have a different working SNMP credential, so a device vulnerable to both isn't missed just because its real credential was found first. Independent of SNMP_TRY_PUBLIC_COMMUNITY -- disabling that setting to avoid intrusion-detection alerts does not disable this security check; disable this one separately if you don't want it either."
+  },
+  "IEEE_OUI_URL": {
+    "value": "https://standards-oui.ieee.org/oui/oui.txt",
+    "description": "The upstream source URL for the daily IEEE MAC-to-Vendor registry."
+  },
+  "HTTP_USER_AGENT": {
+    "value": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "description": "The User-Agent string Netlanvas uses when making external web requests."
+  },
+  "WIFI_STRICT_MODE": {
+    "value": "false",
+    "description": "Require strict 802.11 MIBs to map Wi-Fi clients."
+  },
+  "DB_ARCHIVE_ON_BOOT": {
+    "value": "false",
+    "description": "Testing Mode: Archive and purge the SQLite database on every container restart."
+  },
+  "SETUP_COMPLETE": {
+    "value": "false",
+    "description": "Internal flag indicating if the first-time setup flow is finished."
+  },
+  "LOGIN_COUNT": {
+    "value": "0",
+    "description": "Tracks UI dashboard load frequency for lifecycle events."
+  },
+  "IS_REGISTERED": {
+    "value": "false",
+    "description": "Has this Netlanvas instance opted-in and registered with the community cloud?"
+  },
+  "SUBMIT_TELEMETRY": {
+    "value": "false",
+    "description": "Allow additional, more detailed anonymous usage telemetry. A separate, minimal anonymous install-count ping (random ID only, no other data) is always sent regardless of this setting -- see the note near Instance ID below."
+  },
+  "INSTANCE_ID": {
+    "value": "",
+    "description": "Unique UUID for this installation."
+  },
+  "SESSION_LIFETIME_HOURS": {
+    "value": "12",
+    "description": "How long a login session remains valid before requiring re-authentication."
+  },
+  "TLS_VALIDITY_DAYS": {
+    "value": "825",
+    "description": "Validity period, in days, for the self-signed TLS certificate generated at first boot."
+  },
+  "TLS_RENEW_WITHIN_DAYS": {
+    "value": "30",
+    "description": "Reissue the self-signed TLS certificate automatically when fewer than this many days remain before expiry."
+  },
+  "AUTO_UPDATE_APP": {
+    "value": "false",
+    "description": "Automatically pull and apply new NetLanvas releases as they're published, without waiting for you to click Update Now. Base infrastructure (redis/caddy) always updates automatically regardless of this setting."
+  },
+  "IEEE_OUI28_URL": {
+    "value": "https://standards-oui.ieee.org/oui28/mam.txt",
+    "description": "The upstream source URL for IEEE's MA-M (28-bit) registry -- newer/smaller vendor blocks not covered by the classic MA-L oui.txt."
+  },
+  "IEEE_OUI36_URL": {
+    "value": "https://standards-oui.ieee.org/oui36/oui36.txt",
+    "description": "The upstream source URL for IEEE's MA-S (36-bit) registry -- same purpose as IEEE_OUI28_URL, for the even smaller/newer vendor blocks."
+  },
+  "IANA_ENTERPRISE_NUMBERS_URL": {
+    "value": "https://www.iana.org/assignments/enterprise-numbers.txt",
+    "description": "The upstream source URL for IANA private-enterprise-numbers.txt -- resolves a device SNMP sysObjectID to a vendor name, independent of MAC (works even on locally-administered/randomized MACs where OUI lookup cannot)."
+  }
+}

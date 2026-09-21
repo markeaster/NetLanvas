@@ -1,0 +1,5 @@
+# The README has users generate an SSH keypair directly in this
+# directory (netlanvas_readiness_key / .pub) -- never let a private key
+# end up trackable, even by accident.
+netlanvas_readiness_key
+netlanvas_readiness_key.pub

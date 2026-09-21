@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Hierarchical Topology</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own bg-gray-900 background instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+    <main class="w-[90vw] mx-auto p-8">
+        <header class="mb-8 border-b border-gray-800 pb-4">
+            <h1 class="text-2xl font-bold text-gray-200 tracking-widest uppercase">Dynamic Hierarchy Map</h1>
+            <p class="text-xs text-cyan-500 font-mono mt-1">Self-assembling Depth-First Search (DFS) topology tree</p>
+        </header>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-lg p-6 shadow-xl overflow-x-auto">
+            <div id="tree-wrapper" class="relative font-mono text-sm min-w-max">
+                <svg id="tree-lines-svg" class="absolute top-0 left-0 pointer-events-none" style="overflow: visible;"></svg>
+                <div id="topology-tree" class="relative">
+                    <div class="p-8 text-center text-cyan-500 animate-pulse">Rendering clean adjacency graph...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const archiveParam = urlParams.get('archive');
+        const qs = archiveParam ? `?archive=${encodeURIComponent(archiveParam)}` : '';
+        const isArchiveMode = !!archiveParam;
+
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        async function buildTopologyTree() {
+            try {
+                const [statusRes, topoRes, dashboardRes] = await Promise.all([
+                    fetch('/api/status' + qs).catch(() => ({ json: () => ({ resolved_gateway: null }) })),
+                    fetch('/api/topology' + qs),
+                    fetch('/api/dashboard_data' + qs)
+                ]);
+                const status = await statusRes.json();
+                const data = await topoRes.json();
+                const gwIp = status.resolved_gateway;
+
+                const nodes = {}; 
+                data.nodes.forEach(n => { nodes[String(n.id)] = n; });
+
+                data.endpoint_ledger.forEach(e => { 
+                    const nid = String(e.node_id);
+                    if (nodes[nid]) { 
+                        if (!nodes[nid].ips) nodes[nid].ips = new Set(); 
+                        nodes[nid].ips.add(e.ip_address); 
+                    } 
+                });
+
+                const graph = {};
+                data.topology_edges.forEach(edge => {
+                    const src = String(edge.source_node_id); 
+                    const dst = String(edge.target_node_id);
+                    if (!src || !dst) return;
+                    if (!graph[src]) graph[src] = new Set(); 
+                    if (!graph[dst]) graph[dst] = new Set();
+                    graph[src].add(dst); 
+                    graph[dst].add(src);
+                });
+
+                let rootNodeId = null;
+                for (const ledgerEntry of data.endpoint_ledger) { 
+                    if (ledgerEntry.ip_address === gwIp) { 
+                        rootNodeId = String(ledgerEntry.node_id); 
+                        break; 
+                    } 
+                }
+
+                const visited = new Set();
+                const treeContainer = document.getElementById('topology-tree');
+                treeContainer.innerHTML = '';
+                const edges = [];
+
+                // Layout only -- depth still drives indentation exactly as
+                // before (same "look and feel"), but connector lines are no
+                // longer faked with border-left/border-bottom divs (which
+                // only ever approximate real card heights via guessed
+                // margins). Each edge is recorded here and drawn afterward
+                // as an actual SVG curve between the two cards' real
+                // rendered positions -- see drawTreeLines().
+                function renderNode(nodeId, depth) {
+                    const strNodeId = String(nodeId);
+                    if (visited.has(strNodeId)) return '';
+                    visited.add(strNodeId);
+
+                    const nodeData = nodes[strNodeId];
+                    if (!nodeData) return '';
+
+                    // UI-4: color-per-type matches the same palette used
+                    // everywhere else in the UI (Dashboard's category
+                    // colors, the topology graph's legend) -- Router
+                    // amber, Switch blue, Access Point cyan, Unmanaged
+                    // Switch emerald, Docker Host purple, Endpoint green.
+                    // Icon glyphs are unchanged from before (deliberately
+                    // out of scope -- colour only).
+                    const DFS_TYPE_STYLE = {
+                        'Router':           { icon: '◆', colorClass: 'text-amber-400 bg-amber-500/20 border-amber-500 shadow-md shadow-amber-500/10' },
+                        'Switch':           { icon: '▼', colorClass: 'text-blue-400 bg-blue-900/20 border-blue-800 shadow-sm' },
+                        'Access Point':     { icon: '▼', colorClass: 'text-cyan-400 bg-cyan-900/20 border-cyan-800 shadow-sm' },
+                        'Switch / WAP':     { icon: '▼', colorClass: 'text-cyan-400 bg-cyan-900/20 border-cyan-800 shadow-sm' },
+                        'Unmanaged Switch': { icon: '▼', colorClass: 'text-emerald-400 bg-emerald-900/20 border-emerald-800 shadow-sm' },
+                        'Docker Host':      { icon: '●', colorClass: 'text-purple-400 bg-purple-900/20 border-purple-800 shadow-sm' },
+                        'Server':           { icon: '▬', colorClass: 'text-indigo-400 bg-indigo-900/20 border-indigo-800 shadow-sm' },
+                        'Printer':          { icon: '▬', colorClass: 'text-teal-400 bg-teal-900/20 border-teal-800 shadow-sm' },
+                    };
+                    const { icon, colorClass } = DFS_TYPE_STYLE[nodeData.device_type] || { icon: '●', colorClass: 'text-green-400 bg-green-900/10 border-green-900/50' };
+
+                    const validIps = nodeData.ips ? Array.from(nodeData.ips).filter(ip => ip) : [];
+                    const link = `device.html?id=${encodeURIComponent(strNodeId)}${isArchiveMode ? '&archive='+encodeURIComponent(archiveParam) : ''}`;
+                    const label = `<a href="${link}" id="tree-node-${strNodeId}" class="relative z-10 block flex items-center gap-3 px-3 py-2 border rounded ${colorClass} min-w-[350px] hover:bg-opacity-80 transition cursor-pointer"><span class="text-[10px]">${icon}</span><div class="flex-1"><div class="font-bold text-gray-200 tracking-wide">${escapeHTML(nodeData.hostname) || 'Unknown Node'}</div><div class="text-[10px] text-cyan-400 font-mono">${escapeHTML(validIps.join(', ')) || 'No IP'}</div></div></a>`;
+
+                    let html = `<div class="mb-3" style="margin-left: ${depth * 6}rem;">${label}</div>`;
+
+                    const children = Array.from(graph[strNodeId] || []).filter(c => !visited.has(String(c)));
+                    children.forEach((child) => {
+                        edges.push({ parent: strNodeId, child: String(child) });
+                        html += renderNode(child, depth + 1);
+                    });
+
+                    return html;
+                }
+
+                treeContainer.innerHTML = rootNodeId ? renderNode(rootNodeId, 0) : `<div class="p-4 text-yellow-500">Gateway node (${escapeHTML(gwIp)}) not found.</div>`;
+                lastEdges = edges;
+                requestAnimationFrame(() => drawTreeLines(lastEdges));
+            } catch (err) {
+                console.error("Tree Render Error:", err);
+            }
+        }
+
+        function drawTreeLines(edges) {
+            const svg = document.getElementById('tree-lines-svg');
+            const wrapper = document.getElementById('tree-wrapper');
+            if (!svg || !wrapper) return;
+
+            svg.innerHTML = '';
+            svg.setAttribute('width', wrapper.scrollWidth);
+            svg.setAttribute('height', wrapper.scrollHeight);
+            const wrapperRect = wrapper.getBoundingClientRect();
+
+            edges.forEach(({ parent, child }) => {
+                const parentEl = document.getElementById(`tree-node-${parent}`);
+                const childEl = document.getElementById(`tree-node-${child}`);
+                if (!parentEl || !childEl) return;
+
+                const pRect = parentEl.getBoundingClientRect();
+                const cRect = childEl.getBoundingClientRect();
+
+                // Orthogonal (circuit-diagram style) routing rather than a
+                // bezier curve: straight down from the parent's anchor,
+                // then straight across into the child's. Siblings sharing
+                // one parent share the same vertical trunk segment (they
+                // all start at the same px,py) and only diverge once they
+                // step across to their own child's row -- reads as a clean
+                // trunk-and-branch shape instead of overlapping curves.
+                const startX = pRect.left - wrapperRect.left + 14;
+                const startY = pRect.top + pRect.height / 2 - wrapperRect.top;
+                const endX = cRect.left - wrapperRect.left + 14;
+                const endY = cRect.top + cRect.height / 2 - wrapperRect.top;
+
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', `M ${startX} ${startY} L ${startX} ${endY} L ${endX} ${endY}`);
+                path.setAttribute('stroke', '#64748b');
+                path.setAttribute('stroke-width', '2');
+                path.setAttribute('fill', 'none');
+                path.setAttribute('opacity', '0.7');
+                svg.appendChild(path);
+            });
+        }
+
+        let lastEdges = [];
+        let resizeDebounce = null;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeDebounce);
+            resizeDebounce = setTimeout(() => drawTreeLines(lastEdges), 150);
+        });
+
+        buildTopologyTree();
+        if (!isArchiveMode) setInterval(buildTopologyTree, 15000);
+    </script>
+</body>
+</html>

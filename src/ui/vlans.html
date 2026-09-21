@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | VLAN Registry</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own bg-gray-900 background instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+    <main class="w-[90vw] mx-auto p-8">
+        <header class="mb-8 border-b border-gray-800 pb-4 flex justify-between items-end">
+            <div>
+                <h1 class="text-2xl font-bold text-white tracking-widest uppercase">VLAN Registry</h1>
+                <p class="text-xs text-cyan-500 font-mono mt-1">Named VLANs discovered across your infrastructure, with per-switch source visibility</p>
+            </div>
+            <div id="toast" class="hidden font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300"></div>
+        </header>
+
+        <div class="mb-4 flex items-center justify-end">
+            <label class="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" id="show-empty-toggle" class="sr-only peer" onchange="onShowEmptyToggle(this.checked)">
+                <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-500 relative"></div>
+                <span id="show-empty-label" class="text-[10px] text-cyan-500 font-mono uppercase tracking-wider"></span>
+            </label>
+        </div>
+
+        <div id="vlan-list" class="space-y-4">
+            <div class="text-center text-cyan-500 animate-pulse font-mono w-full">Loading VLAN Registry...</div>
+        </div>
+    </main>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const archiveParam = urlParams.get('archive');
+        const qs = archiveParam ? `?archive=${encodeURIComponent(archiveParam)}` : '';
+        const isArchiveMode = !!archiveParam;
+
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300 ${type === 'success' ? 'bg-green-900/50 text-green-400 border border-green-500/50' : 'bg-red-900/50 text-red-400 border border-red-500/50'}`;
+            toast.classList.remove('hidden');
+            setTimeout(() => toast.classList.add('hidden'), 3000);
+        }
+
+        function renderSources(sources) {
+            if (!sources || sources.length === 0) {
+                return '<div class="text-gray-600 text-[11px] font-mono italic px-1">No live SNMP source -- name is manually set.</div>';
+            }
+            const rows = sources.map(s => `
+                <tr class="border-t border-gray-800">
+                    <td class="py-1.5 pr-4 text-blue-400 font-mono text-xs max-w-[180px] truncate" title="${escapeHTML(s.hostname) || escapeHTML(s.switch_ip)}">${escapeHTML(s.hostname) || escapeHTML(s.switch_ip)}</td>
+                    <td class="py-1.5 pr-4 text-cyan-500 font-mono text-[10px] whitespace-nowrap">${escapeHTML(s.switch_ip)}</td>
+                    <td class="py-1.5 pr-4 text-gray-300 font-mono text-xs max-w-[160px] truncate" title="${escapeHTML(s.reported_name)}">${escapeHTML(s.reported_name)}</td>
+                    <td class="py-1.5 text-cyan-500 font-mono text-[10px] whitespace-nowrap">${escapeHTML(s.last_seen)}</td>
+                </tr>
+            `).join('');
+            return `
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left mt-2 min-w-[480px]">
+                        <thead>
+                            <tr class="text-gray-600 text-[9px] uppercase tracking-wider">
+                                <th class="pb-1 pr-4 font-bold">Switch</th>
+                                <th class="pb-1 pr-4 font-bold">IP</th>
+                                <th class="pb-1 pr-4 font-bold">Reported Name</th>
+                                <th class="pb-1 font-bold">Last Seen</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        function renderSubnets(subnets) {
+            if (!subnets || subnets.length === 0) {
+                return '<div class="text-gray-600 text-[11px] font-mono italic mb-3">No associated endpoints yet.</div>';
+            }
+            const parts = subnets.map(s => {
+                const countLabel = s.count !== null && s.count !== undefined ? ` (${s.count})` : '';
+                if (s.confirmed) {
+                    const title = s.interface_name ? `Confirmed via router interface "${s.interface_name}"${s.router_ip ? ' on ' + s.router_ip : ''}` : 'Confirmed via router interface config';
+                    return `<span class="inline-flex items-center gap-1" title="${escapeHTML(title)}">
+                        <span class="text-green-400">&check;</span>
+                        <span class="text-green-400">${escapeHTML(s.subnet)}</span><span class="text-gray-600">${countLabel}</span>
+                    </span>`;
+                }
+                return `<span title="Inferred from switch FDB data, not confirmed by the router's own config">
+                    <span class="text-gray-300">${escapeHTML(s.subnet)}</span><span class="text-gray-600">${countLabel}</span>
+                </span>`;
+            }).join('<span class="text-gray-700 mx-1.5">&middot;</span>');
+            return `<div class="text-[11px] text-cyan-400 font-mono mb-3 flex flex-wrap items-center gap-x-1">
+                <span class="text-cyan-500 uppercase tracking-wider text-[9px] mr-1">Subnet(s):</span>${parts}
+            </div>`;
+        }
+
+        function renderVlanCard(vlan) {
+            const isOverride = !!vlan.is_admin_named;
+            const disabledAttr = isArchiveMode ? 'disabled' : '';
+            return `
+                <div class="bg-gray-800 p-5 rounded-lg border border-gray-700 shadow-xl">
+                    <div class="flex items-center justify-between gap-2 mb-3">
+                        <span class="text-amber-400 font-mono font-bold text-sm">VLAN ${vlan.vlan_id}</span>
+                        ${isOverride
+                            ? `<span class="text-[9px] uppercase tracking-wider text-amber-400 border border-amber-800 bg-amber-900/20 px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0">Admin Override</span>`
+                            : `<span class="text-[9px] uppercase tracking-wider text-cyan-500 border border-gray-700 px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0">Auto (SNMP)</span>`}
+                    </div>
+                    ${renderSubnets(vlan.subnets)}
+                    <div class="flex flex-wrap items-center gap-2 mb-1">
+                        <input type="text" id="vlan-name-${vlan.vlan_id}" value="${escapeHTML(vlan.vlan_name || '')}" ${disabledAttr}
+                            class="flex-1 min-w-[160px] bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded p-1.5 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                        ${!isArchiveMode ? `<button onclick="saveVlanName(${vlan.vlan_id})" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white font-bold px-3 py-1.5 rounded shadow transition text-xs whitespace-nowrap" title="Save">Save</button>` : ''}
+                        ${(!isArchiveMode && isOverride)
+                            ? `<button onclick="resetVlanName(${vlan.vlan_id})" class="flex-shrink-0 text-cyan-400 hover:text-gray-300 px-3 py-1.5 bg-gray-900 rounded border border-gray-600 transition text-xs whitespace-nowrap" title="Revert to SNMP-sourced name">Revert</button>`
+                            : ''}
+                    </div>
+                    ${renderSources(vlan.sources)}
+                </div>
+            `;
+        }
+
+        let allVlans = [];
+        let showEmptyVlans = false;
+
+        // A VLAN is "empty" when nothing associates it with any actual
+        // subnet -- no router-confirmed interface binding, and no
+        // endpoint has ever been FDB-tagged with it. That's distinct
+        // from having no live SNMP source: an admin-named VLAN with no
+        // current source is still meaningful, but a VLAN with zero
+        // subnets is just a name defined on a switch that nothing has
+        // ever actually used. Hidden by default; toggle reveals them
+        // for cases like troubleshooting a newly-provisioned VLAN.
+        function isEmptyVlan(vlan) {
+            return !vlan.subnets || vlan.subnets.length === 0;
+        }
+
+        function renderVlanList() {
+            const container = document.getElementById('vlan-list');
+            const visible = showEmptyVlans ? allVlans : allVlans.filter(v => !isEmptyVlan(v));
+            const hiddenCount = allVlans.length - visible.length;
+
+            const label = document.getElementById('show-empty-label');
+            if (label) {
+                label.textContent = hiddenCount > 0
+                    ? `Show Empty VLANs (${hiddenCount} hidden)`
+                    : 'Show Empty VLANs';
+            }
+
+            if (allVlans.length === 0) {
+                container.innerHTML = '<div class="text-center text-cyan-500 font-mono w-full py-8">No VLANs discovered yet.</div>';
+                return;
+            }
+            if (visible.length === 0) {
+                container.innerHTML = '<div class="text-center text-cyan-500 font-mono w-full py-8">All discovered VLANs are empty (no associated subnet or endpoints). Toggle "Show Empty VLANs" above to see them.</div>';
+                return;
+            }
+            container.innerHTML = visible.map(renderVlanCard).join('');
+        }
+
+        function onShowEmptyToggle(checked) {
+            showEmptyVlans = checked;
+            renderVlanList();
+        }
+
+        async function loadVlans() {
+            try {
+                const res = await fetch('/api/vlans' + qs);
+                const data = await res.json();
+                allVlans = data.vlans || [];
+                renderVlanList();
+            } catch (e) {
+                console.error('Failed to load VLANs', e);
+                document.getElementById('vlan-list').innerHTML = '<div class="text-red-500 font-mono text-center py-8">Failed to load VLAN registry.</div>';
+            }
+        }
+
+        async function saveVlanName(vlanId) {
+            const input = document.getElementById(`vlan-name-${vlanId}`);
+            const name = input.value.trim();
+            if (!name) {
+                showToast('VLAN name cannot be blank.', 'error');
+                return;
+            }
+            try {
+                const res = await fetch('/api/vlans', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ vlan_id: vlanId, vlan_name: name })
+                });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                await loadVlans();
+                showToast(`[*] VLAN ${vlanId} renamed.`, 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        async function resetVlanName(vlanId) {
+            if (!confirm('Revert this VLAN to its SNMP-sourced name? Manual changes will be lost on the next scan.')) return;
+            try {
+                const res = await fetch(`/api/vlans/${vlanId}/reset`, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                await loadVlans();
+                showToast(`[*] VLAN ${vlanId} reverted to auto naming.`, 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        loadVlans();
+        if (!isArchiveMode) setInterval(loadVlans, 30000);
+    </script>
+</body>
+</html>

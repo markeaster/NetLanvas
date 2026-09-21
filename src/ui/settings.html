@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Settings</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        /* Hide scrollbar for Chrome, Safari and Opera */
+        #log-window::-webkit-scrollbar { display: none; }
+        /* Hide scrollbar for IE, Edge and Firefox */
+        #log-window { -ms-overflow-style: none; scrollbar-width: none; }
+
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own bg-gray-900 background instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased overflow-x-hidden">
+
+    <!-- INITIAL ONBOARDING MODAL -->
+    <!-- NATIVE-16 follow-up: overflow-y-auto and flex items-center on the
+         SAME element is a well-known CSS trap -- when content is taller
+         than the viewport, centering computes the card's position first
+         and the overflow that spills above the container's top edge is
+         unreachable by scrolling (you can scroll down into the bottom
+         overflow, never up into the top). Confirmed live as real user
+         feedback (2026-09-02, macOS first-run testing on a laptop
+         screen): "the modal doesnt fit in the browser window / scroll
+         to the top / bottom." Splitting the scrolling element (this
+         outer div, plain overflow-y-auto, no flex) from the centering
+         element (the new inner wrapper below, min-h-full flex
+         items-center) fixes it -- centering now happens inside a
+         naturally-sized wrapper that itself scrolls within the outer
+         div, so the full card is reachable in both directions
+         regardless of viewport height. -->
+    <div id="setup-modal" class="fixed inset-0 z-50 hidden backdrop-blur-sm overflow-y-auto" style="background-color: rgba(0, 0, 0, 0.9);">
+      <div class="min-h-full flex items-center justify-center p-4">
+        <div class="bg-gray-800 border border-gray-700 rounded-lg p-8 w-full max-w-2xl shadow-2xl relative my-8">
+            <h2 class="text-2xl font-bold text-gray-200 tracking-widest uppercase border-b border-gray-700 pb-4 mb-6">Appliance Initialization</h2>
+            
+            <div id="setup-form" class="space-y-6">
+                <div class="bg-gray-900/50 p-4 border border-blue-900/50 rounded space-y-4">
+                    <div>
+                        <label class="block text-blue-400 font-bold font-mono text-sm mb-1">Admin Username</label>
+                        <p class="text-[10px] text-gray-200 font-mono mb-2 uppercase tracking-wider">Used to sign in to this appliance's web UI.</p>
+                        <input type="text" id="setup-username" autocomplete="username" value="admin" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5">
+                    </div>
+                    <div>
+                        <label class="block text-blue-400 font-bold font-mono text-sm mb-1">Admin Password</label>
+                        <input type="password" id="setup-password" autocomplete="new-password" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5" placeholder="Minimum 8 characters">
+                    </div>
+                    <div>
+                        <label class="block text-blue-400 font-bold font-mono text-sm mb-1">Confirm Password</label>
+                        <input type="password" id="setup-password-confirm" autocomplete="new-password" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-blue-400 font-bold font-mono text-sm mb-1">Setup Token</label>
+                    <p id="setup-token-hint" class="text-[10px] text-gray-200 font-mono mb-2 uppercase tracking-wider">
+                        One-time token from <code>docker logs netlanvas_api</code> or
+                        <code>docker exec netlanvas_api cat /app/tls/welcome.txt</code>.
+                    </p>
+                    <input type="text" id="setup-token" autocomplete="off" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5">
+                </div>
+
+                <div>
+                    <label class="block text-blue-400 font-bold font-mono text-sm mb-1">SNMP Community String(s)</label>
+                    <p class="text-[10px] text-gray-200 font-mono mb-2 uppercase tracking-wider">Comma-separated list of read-only strings used for infrastructure polling.</p>
+                    <input type="text" id="setup-snmp" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5" placeholder="e.g. public, private">
+                </div>
+
+                <div class="flex justify-between items-center bg-gray-900/50 p-4 border border-gray-700 rounded hover:bg-gray-900 transition">
+                    <div>
+                        <div class="text-sm font-bold text-gray-200 font-mono">Also Try "public" Community</div>
+                        <div class="text-[10px] text-gray-200 mt-1 uppercase tracking-wider">Fall back to the well-known default if your configured strings fail. Disable if your network intentionally blocks/monitors this default.</div>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                        <input type="checkbox" id="setup-snmp-try-public" class="sr-only peer" checked>
+                        <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <div class="flex justify-between items-center bg-gray-900/50 p-4 border border-gray-700 rounded hover:bg-gray-900 transition">
+                    <div>
+                        <div class="text-sm font-bold text-gray-200 font-mono">Use SNMP v3?</div>
+                        <div class="text-[10px] text-gray-200 mt-1 uppercase tracking-wider">More secure than v2c community strings. You can add more identities later in Settings.</div>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                        <input type="checkbox" id="setup-snmp-v3-enabled" class="sr-only peer" onchange="toggleSnmpV3Fields()">
+                        <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <div id="setup-snmp-v3-fields" class="hidden space-y-3 bg-gray-900/30 border border-gray-700 rounded p-4">
+                    <div>
+                        <label class="block text-blue-400 font-bold font-mono text-sm mb-1">SNMP v3 Username</label>
+                        <input type="text" id="setup-snmp-v3-username" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5">
+                    </div>
+                    <div>
+                        <label class="block text-blue-400 font-bold font-mono text-sm mb-1">SNMP v3 Auth Password</label>
+                        <input type="password" id="setup-snmp-v3-password" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5">
+                    </div>
+                    <div>
+                        <label class="block text-blue-400 font-bold font-mono text-sm mb-1">SNMP v3 Privacy Password</label>
+                        <input type="password" id="setup-snmp-v3-priv-password" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5">
+                    </div>
+                    <p class="text-[10px] text-gray-200 leading-relaxed">Security protocol is discovered automatically per device -- no need to select one. Use a different password here than the auth password above so the two keys are independent.</p>
+                </div>
+                
+                <div class="flex justify-between items-center bg-gray-900/50 p-4 border border-gray-700 rounded hover:bg-gray-900 transition">
+                    <div>
+                        <div class="text-sm font-bold text-gray-200 font-mono">Verbose Logging</div>
+                        <div class="text-[10px] text-gray-200 mt-1 uppercase tracking-wider">Enable deep debug terminal output. Recommended for initial deployments.</div>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                        <input type="checkbox" id="setup-verbose" class="sr-only peer" checked>
+                        <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <div class="flex justify-between items-center bg-gray-900/50 p-4 border border-gray-700 rounded hover:bg-gray-900 transition">
+                    <div>
+                        <div class="text-sm font-bold text-gray-200 font-mono">DB Archive on Boot</div>
+                        <div class="text-[10px] text-gray-200 mt-1 uppercase tracking-wider">Automatically rotate and wipe the SQLite database on core engine restart.</div>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                        <input type="checkbox" id="setup-archive" class="sr-only peer">
+                        <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <div class="bg-blue-900/10 border border-blue-900/30 rounded p-3 text-[10px] text-gray-200 leading-relaxed">
+                    <strong class="text-blue-400">Note:</strong> A random, anonymous installation ID is always sent to netlanvas.com so we can count active installs. No other data is included. The toggle below controls additional, more detailed usage telemetry only -- it does not affect this basic count either way.
+                </div>
+
+                <div class="flex justify-between items-center bg-gray-900/50 p-4 border border-gray-700 rounded hover:bg-gray-900 transition">
+                    <div>
+                        <div class="text-sm font-bold text-gray-200 font-mono">Submit Telemetry</div>
+                        <div class="text-[10px] text-gray-200 mt-1 uppercase tracking-wider">Allow additional, more detailed anonymous usage telemetry.</div>
+                        <!-- New tab, not the same iframe -- this sits inside the
+                             setup form, which has in-progress, unsaved fields
+                             (username/password/SNMP strings etc.); navigating
+                             this iframe away to preview telemetry would lose
+                             all of that. The permanent, ongoing home for this
+                             (toggle + live preview + Submit Now, see
+                             netlanvas-telemetry-pipeline-v6 S7) is
+                             telemetry.html, linked from Settings after setup
+                             is done -- this is just an early pointer to it. -->
+                        <a href="telemetry.html" target="_blank" class="text-[10px] text-blue-400 hover:text-blue-300 underline mt-1 inline-block">Preview Sanitised Telemetry</a>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                        <input type="checkbox" id="setup-telemetry" class="sr-only peer">
+                        <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                </div>
+
+                <div class="pt-6 border-t border-gray-700 flex justify-between gap-4">
+                    <button type="button" onclick="executeSetup(false)" class="bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold font-mono py-3 px-8 rounded shadow transition w-1/2">
+                        OK, Register Later
+                    </button>
+                    <button type="button" onclick="executeSetup(true)" class="bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-3 px-8 rounded shadow transition w-1/2">
+                        OK, Register Now
+                    </button>
+                </div>
+            </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MAIN SETTINGS INTERFACE -->
+    <main class="w-[90vw] mx-auto p-8 space-y-8">
+        <header class="border-b border-gray-800 pb-4 flex justify-between items-end">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-200 tracking-widest uppercase">Appliance Configuration</h1>
+                <p class="text-xs text-gray-200 font-mono mt-1">Live SQLite runtime control plane</p>
+            </div>
+            <div id="toast" class="hidden font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300"></div>
+        </header>
+
+        <div id="settings-container" class="space-y-8 transition-opacity duration-300">
+            <div class="text-center text-gray-200 animate-pulse font-mono w-full">Loading System Configuration...</div>
+        </div>
+
+        <!-- Live Logs and Appearance both sit above the Appliance Settings
+             grid now (moved 2026-09-10) -- Appearance specifically groups
+             with it since it's itself an appliance-wide setting, just not
+             a boolean toggle so it doesn't fit createToggle()'s card shape. -->
+        <section class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl">
+            <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                <h2 class="text-blue-500 font-bold uppercase text-sm tracking-wider">Live System Logs (netlanvas_core)</h2>
+                <div id="log-status" class="flex items-center gap-2 text-xs font-mono">
+                    <span id="log-tick-display" class="text-gray-200 border-r border-gray-700 pr-2 mr-1"></span>
+                    <span class="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" id="log-indicator"></span>
+                    <span id="log-status-text" class="text-gray-200">Connecting...</span>
+                </div>
+            </div>
+            <div id="restart-pending-banner" class="hidden bg-amber-900/10 border border-amber-900/30 rounded p-3 text-[10px] text-amber-400 leading-relaxed mb-3 font-mono">
+                <strong>&#9203; Appliance scheduled for restart</strong> -- the current scan cycle is still finishing. Restart Engine only checks for this once per cycle, at the start, so it will take effect once the cycle in progress completes, not instantly.
+            </div>
+            <div id="log-window" class="bg-black border border-gray-900 h-80 overflow-hidden pointer-events-none select-none p-4 text-[11px] font-mono text-gray-300 leading-relaxed rounded shadow-inner break-words">
+            </div>
+        </section>
+
+        <section class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl">
+            <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                <h2 class="text-blue-500 font-bold uppercase text-sm tracking-wider">Appearance</h2>
+            </div>
+            <p class="text-[10px] text-gray-200 mb-4 leading-relaxed">
+                Applies appliance-wide -- the same theme shows on this appliance's UI regardless of which browser or device opens it.
+            </p>
+            <div class="flex gap-3">
+                <button id="theme-btn-dark" onclick="setUiTheme('dark')" class="flex-1 py-2.5 rounded font-mono text-xs uppercase tracking-widest transition border">Dark</button>
+                <button id="theme-btn-light" onclick="setUiTheme('light')" class="flex-1 py-2.5 rounded font-mono text-xs uppercase tracking-widest transition border">Light</button>
+            </div>
+        </section>
+
+        <section class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl">
+            <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                <h2 class="text-blue-500 font-bold uppercase text-sm tracking-wider">Polling Schedule</h2>
+                <div id="polling-status-badge" class="flex items-center gap-2 text-xs font-mono"></div>
+            </div>
+            <p class="text-[10px] text-gray-200 mb-4 leading-relaxed">
+                Continuous polls the network indefinitely, exactly as before. Time Limited runs for a set number of hours, then pauses -- the dashboard, alerts, and inventory all stay fully browsable against the last-known state while paused, they just stop updating until you resume.
+            </p>
+            <div class="flex gap-3 mb-4">
+                <button id="polling-mode-btn-continuous" onclick="setPollingMode('continuous')" class="flex-1 py-2.5 rounded font-mono text-xs uppercase tracking-widest transition border">Continuous</button>
+                <button id="polling-mode-btn-time_limited" onclick="setPollingMode('time_limited')" class="flex-1 py-2.5 rounded font-mono text-xs uppercase tracking-widest transition border">Time Limited</button>
+            </div>
+            <div id="polling-duration-row" class="flex items-end gap-3 mb-4">
+                <div class="flex-1">
+                    <label class="block mb-1 text-[10px] font-mono text-gray-200 uppercase tracking-wider">Run Duration (hours)</label>
+                    <input type="number" id="polling-duration-input" min="1" step="1" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5" onchange="updateSetting('POLLING_DURATION_HOURS', this)">
+                </div>
+            </div>
+            <button id="polling-start-now-btn" onclick="startPollingNow()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-2.5 rounded shadow transition text-xs uppercase tracking-widest">Start Now</button>
+        </section>
+
+        <div id="appliance-settings-container" class="space-y-3"></div>
+
+        <!-- SNMP v2c COMMUNITY STRINGS -->
+        <section id="snmp-v2c-section" class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl transition-opacity duration-300">
+            <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                <h2 class="text-blue-500 font-bold uppercase text-sm tracking-wider">SNMP v2c Community String(s)</h2>
+            </div>
+            <p class="text-[10px] text-gray-200 mb-4 leading-relaxed">
+                Comma-separated list of read-only community strings used for infrastructure polling. Tried after any SNMP v3 identities configured below.
+            </p>
+            <input type="text" id="snmp-community-input" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5" placeholder="e.g. public, private" onchange="updateSetting('SNMP_COMMUNITY_STRING', this)">
+        </section>
+
+        <!-- SNMPv3 IDENTITIES -->
+        <section id="snmp-v3-section" class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl transition-opacity duration-300">
+            <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                <h2 class="text-blue-500 font-bold uppercase text-sm tracking-wider">SNMP v3 Identities</h2>
+            </div>
+            <p class="text-[10px] text-gray-200 mb-4 leading-relaxed">
+                Each identity is tried against every device (strongest security protocol first) until one succeeds. No protocol selection needed -- NetLanvas discovers the correct pairing automatically per device. Tried before any SNMP v2c community strings (see Environment Strings below).
+            </p>
+            <div id="snmp-v3-noise-warning" class="hidden bg-amber-900/10 border border-amber-900/30 rounded p-3 text-[10px] text-gray-200 leading-relaxed mb-4">
+                <strong>Note:</strong> With more than one identity configured, devices will see (and may log) authentication attempts using identities that turn out not to be theirs, before the correct one is found. This is expected during discovery, not a sign of a problem -- once a device's correct identity is found, it is remembered and tried first from then on.
+            </div>
+            <div id="snmp-v3-list" class="space-y-2 mb-4">
+                <div class="text-gray-200 text-xs font-mono italic">Loading...</div>
+            </div>
+            <div class="flex gap-2 items-end border-t border-gray-700 pt-4">
+                <div class="flex-1">
+                    <label class="block text-[10px] text-gray-200 uppercase tracking-wider mb-1">Username</label>
+                    <input type="text" id="snmp-v3-new-username" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                </div>
+                <div class="flex-1">
+                    <label class="block text-[10px] text-gray-200 uppercase tracking-wider mb-1">Auth Password</label>
+                    <input type="password" id="snmp-v3-new-password" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                </div>
+                <div class="flex-1">
+                    <label class="block text-[10px] text-gray-200 uppercase tracking-wider mb-1">Privacy Password</label>
+                    <input type="password" id="snmp-v3-new-priv-password" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                </div>
+                <button onclick="addSnmpV3Identity()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-2 px-4 rounded shadow transition text-xs uppercase tracking-widest whitespace-nowrap">+ Add</button>
+            </div>
+        </section>
+
+        <!-- SYSTEM OPERATIONS -->
+        <section id="operations-section" class="bg-gray-800 p-6 rounded-lg border border-red-900/50 shadow-xl transition-opacity duration-300">
+            <h2 class="text-red-500 font-bold mb-4 uppercase text-sm tracking-wider border-b border-gray-700 pb-2">System Operations</h2>
+            
+            <div class="flex flex-col gap-6">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <div class="text-gray-200 font-bold font-mono text-sm">Restart Core Engine</div>
+                        <div class="text-gray-200 text-[10px] mt-1 pr-4">Publishes a restart command via Redis IPC to netlanvas_core, which checks for it once per cycle, at the start of each one -- takes effect once the current cycle finishes, not instantly.</div>
+                    </div>
+                    <button onclick="restartCoreEngine()" class="bg-red-600 hover:bg-red-500 text-white font-bold font-mono py-2 px-6 rounded shadow transition whitespace-nowrap">Restart Engine</button>
+                </div>
+
+                <div class="flex items-center justify-between border-t border-gray-700/50 pt-6">
+                    <div>
+                        <div class="text-amber-500 font-bold font-mono text-sm">Force Topology Rebuild</div>
+                        <div class="text-gray-200 text-[10px] mt-1 pr-4">Instantly ages out all inferred Layer 2 bridges and forces the density engine to recalculate topology logic from scratch.</div>
+                    </div>
+                    <button onclick="forceTopologyRebuild()" class="bg-amber-600 hover:bg-amber-500 text-white font-bold font-mono py-2 px-6 rounded shadow transition whitespace-nowrap">Rebuild Topology</button>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <script>
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        // --- SNMPv3 Identities (SNMP-5/SNMP-9) ---
+        let snmpV3Identities = [];
+
+        async function loadSnmpV3Identities() {
+            try {
+                const res = await fetch('/api/snmp/v3-identities');
+                const data = await res.json();
+                snmpV3Identities = data.identities || [];
+                renderSnmpV3List();
+            } catch (e) {
+                console.error('Failed to load SNMP v3 identities', e);
+            }
+        }
+
+        function renderSnmpV3Row(identity, index, total) {
+            return `
+                <div class="flex items-center justify-between bg-gray-900/50 border border-gray-700/50 rounded p-2.5">
+                    <div class="flex items-center gap-3">
+                        <span class="text-gray-200 font-mono text-xs w-6">${index + 1}.</span>
+                        <span class="text-gray-200 font-mono text-sm">${escapeHTML(identity.username)}</span>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <button onclick="moveSnmpV3Identity(${identity.id}, -1)" ${index === 0 ? 'disabled' : ''} class="text-cyan-400 hover:text-gray-200 disabled:opacity-20 disabled:cursor-not-allowed p-1" title="Move up">&#9650;</button>
+                        <button onclick="moveSnmpV3Identity(${identity.id}, 1)" ${index === total - 1 ? 'disabled' : ''} class="text-cyan-400 hover:text-gray-200 disabled:opacity-20 disabled:cursor-not-allowed p-1" title="Move down">&#9660;</button>
+                        <button onclick="removeSnmpV3Identity(${identity.id})" class="text-red-400 hover:text-red-300 p-1 ml-2" title="Remove">&#10005;</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderSnmpV3List() {
+            const container = document.getElementById('snmp-v3-list');
+            const warning = document.getElementById('snmp-v3-noise-warning');
+            if (!container) return;
+            if (snmpV3Identities.length === 0) {
+                container.innerHTML = '<div class="text-gray-200 text-xs font-mono italic">No SNMPv3 identities configured. Add one below, or rely on SNMP v2c community strings (see Environment Strings).</div>';
+            } else {
+                container.innerHTML = snmpV3Identities.map((identity, i) => renderSnmpV3Row(identity, i, snmpV3Identities.length)).join('');
+            }
+            // SNMP-9: persistent noise warning whenever the list holds
+            // more than one identity -- not a one-time dismissible
+            // popup, since identities can be added long after setup.
+            if (warning) {
+                if (snmpV3Identities.length > 1) warning.classList.remove('hidden');
+                else warning.classList.add('hidden');
+            }
+        }
+
+        async function addSnmpV3Identity() {
+            const usernameInput = document.getElementById('snmp-v3-new-username');
+            const passwordInput = document.getElementById('snmp-v3-new-password');
+            const privPasswordInput = document.getElementById('snmp-v3-new-priv-password');
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value;
+            const privPassword = privPasswordInput.value;
+            if (!username || !password || !privPassword) {
+                showToast('Username, auth password, and privacy password are all required.', 'error');
+                return;
+            }
+            try {
+                const res = await fetch('/api/snmp/v3-identities', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, priv_password: privPassword })
+                });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                usernameInput.value = '';
+                passwordInput.value = '';
+                privPasswordInput.value = '';
+                await loadSnmpV3Identities();
+                showToast('[*] SNMPv3 identity added.', 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        async function removeSnmpV3Identity(id) {
+            if (!confirm('Remove this SNMPv3 identity?')) return;
+            try {
+                const res = await fetch(`/api/snmp/v3-identities/${id}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                await loadSnmpV3Identities();
+                showToast('[*] SNMPv3 identity removed.', 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        async function moveSnmpV3Identity(id, direction) {
+            const index = snmpV3Identities.findIndex(i => i.id === id);
+            const newIndex = index + direction;
+            if (newIndex < 0 || newIndex >= snmpV3Identities.length) return;
+            const reordered = [...snmpV3Identities];
+            [reordered[index], reordered[newIndex]] = [reordered[newIndex], reordered[index]];
+            snmpV3Identities = reordered;
+            renderSnmpV3List();
+            try {
+                await fetch('/api/snmp/v3-identities/reorder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ordered_ids: reordered.map(i => i.id) })
+                });
+            } catch (e) {
+                showToast('[!] Failed to save new order.', 'error');
+                await loadSnmpV3Identities(); // revert to server truth on failure
+            }
+        }
+
+        const booleanKeys = ['VERBOSE_LOGGING', 'WIFI_STRICT_MODE', 'DB_ARCHIVE_ON_BOOT', 'SUBMIT_TELEMETRY', 'SNMP_TRY_PUBLIC_COMMUNITY', 'SNMP_SECURITY_SCAN_PUBLIC'];
+        const readonlyBooleanKeys = [];
+        // Pruned from the generic Environment Strings list: pure internal
+        // bookkeeping that was never meant to be user-facing (LOGIN_COUNT,
+        // SETUP_COMPLETE, _LAST_KNOWN_VERSION, ALERTS_HAS_NEW), and the
+        // SEVERITY_* keys, which duplicate the Alerts page's own dedicated
+        // Severity tab -- editing them here bypassed that controlled UI
+        // entirely via a plain, unvalidated text box.
+        const hiddenKeys = [
+            'FORCE_TOPOLOGY_REBUILD', '_LATEST_VERSION_SEEN',
+            'LOGIN_COUNT', 'SETUP_COMPLETE', '_LAST_KNOWN_VERSION', 'ALERTS_HAS_NEW',
+            'SEVERITY_OFFLINE_ROUTER', 'SEVERITY_OFFLINE_INFRASTRUCTURE', 'SEVERITY_OFFLINE_ENDPOINT', 'SEVERITY_SNMP_EXPOSURE',
+            'SEVERITY_SNMP_V3_UNUSED',
+            // Polling Schedule has its own dedicated section above (mode
+            // buttons + duration field + Start Now), same reasoning as
+            // UI_THEME/Appearance -- not a plain generic toggle/string.
+            'POLLING_MODE', 'POLLING_DURATION_HOURS', '_POLLING_ACTIVE', '_POLLING_STARTED_AT',
+            // Polling Source (SCAN_INTERFACE_OVERRIDE) gets its own
+            // dedicated dropdown card next to Remote Web Viewing --
+            // same reasoning again, a plain text box would let you type
+            // any string instead of picking from real interfaces.
+            'SCAN_INTERFACE_OVERRIDE',
+        ];
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message; 
+            toast.className = `font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300 ${type === 'success' ? 'bg-green-900/50 text-green-400 border border-green-500/50' : 'bg-red-900/50 text-red-400 border border-red-500/50'}`;
+            toast.classList.remove('hidden');
+            setTimeout(() => toast.classList.add('hidden'), 3000);
+        }
+
+        function toggleSnmpV3Fields() {
+            const enabled = document.getElementById('setup-snmp-v3-enabled').checked;
+            document.getElementById('setup-snmp-v3-fields').classList.toggle('hidden', !enabled);
+        }
+
+        function validateSetupForm() {
+            const username = document.getElementById('setup-username').value.trim();
+            const password = document.getElementById('setup-password').value;
+            const passwordConfirm = document.getElementById('setup-password-confirm').value;
+            const setupToken = document.getElementById('setup-token').value.trim();
+            const snmp = document.getElementById('setup-snmp').value.trim();
+            const snmpV3Enabled = document.getElementById('setup-snmp-v3-enabled').checked;
+
+            if (!setupToken) {
+                alert("CRITICAL: Setup token is required. Check `docker logs netlanvas_api` or `docker exec netlanvas_api cat /app/tls/welcome.txt`.");
+                return false;
+            }
+            if (!username) {
+                alert("CRITICAL: Admin username cannot be blank.");
+                return false;
+            }
+            if (password.length < 8) {
+                alert("CRITICAL: Admin password must be at least 8 characters.");
+                return false;
+            }
+            if (password !== passwordConfirm) {
+                alert("CRITICAL: Password and confirmation do not match.");
+                return false;
+            }
+            if (!snmp) {
+                alert("CRITICAL: SNMP Community String cannot be blank. Infrastructure mapping requires authentication.");
+                return false;
+            }
+            if (snmpV3Enabled) {
+                const v3Username = document.getElementById('setup-snmp-v3-username').value.trim();
+                const v3Password = document.getElementById('setup-snmp-v3-password').value;
+                const v3PrivPassword = document.getElementById('setup-snmp-v3-priv-password').value;
+                if (!v3Username || !v3Password || !v3PrivPassword) {
+                    alert("CRITICAL: SNMP v3 username, auth password, and privacy password are all required when v3 is enabled.");
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        async function executeSetup(registerNow) {
+            if (!validateSetupForm()) return;
+
+            // REG-4 (2026-09-17): if this flow is going to open a
+            // registration tab at all, it must be opened HERE,
+            // synchronously, in direct response to the click --
+            // executeSetup() itself makes several real await fetches
+            // (account creation, login, then a batch of settings
+            // writes) before ever reaching the point a tab would
+            // normally open, and by then the browser's transient
+            // user-activation from the original click is long gone.
+            // window.open() called after that gap is silently blocked,
+            // no error, indistinguishable from the click doing nothing
+            // -- exactly REG-3's bug, just one call site it was never
+            // actually applied to. Opening a blank tab immediately and
+            // handing its reference to startRegistration() to navigate
+            // once the real URL is known sidesteps the gap entirely.
+            const registerTab = registerNow ? window.open('', '_blank') : null;
+
+            const username = document.getElementById('setup-username').value.trim();
+            const password = document.getElementById('setup-password').value;
+            const setupToken = document.getElementById('setup-token').value.trim();
+            const snmp = document.getElementById('setup-snmp').value.trim();
+            const verbose = document.getElementById('setup-verbose').checked.toString();
+            const archive = document.getElementById('setup-archive').checked.toString();
+            const telemetry = document.getElementById('setup-telemetry').checked.toString();
+            const snmpTryPublic = document.getElementById('setup-snmp-try-public').checked.toString();
+            const snmpV3Enabled = document.getElementById('setup-snmp-v3-enabled').checked;
+            const snmpV3Username = document.getElementById('setup-snmp-v3-username').value.trim();
+            const snmpV3Password = document.getElementById('setup-snmp-v3-password').value;
+            const snmpV3PrivPassword = document.getElementById('setup-snmp-v3-priv-password').value;
+
+            try {
+                // Step 1: create the admin account. Unauthenticated by design
+                // (see src/security/middleware.py UNAUTHENTICATED_PATHS) --
+                // this is the only route that may create a user, and only
+                // while setup is incomplete.
+                const setupRes = await fetch('/api/setup/password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, setup_token: setupToken })
+                });
+                if (!setupRes.ok) {
+                    const body = await setupRes.json().catch(() => ({}));
+                    alert(`Failed to create admin account: ${body.detail || 'Unknown error'}`);
+                    return;
+                }
+
+                // Step 2: log in immediately so the remaining, now-authenticated
+                // /api/settings calls below succeed.
+                const loginRes = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ username, password })
+                });
+                if (!loginRes.ok) {
+                    alert("Account created, but automatic sign-in failed. Please sign in manually.");
+                    window.location.href = '/dashboard/login.html';
+                    return;
+                }
+
+                // Step 3: everything else, as before.
+                const setupPromises = [
+                    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'SNMP_COMMUNITY_STRING', value: snmp }) }),
+                    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'SNMP_TRY_PUBLIC_COMMUNITY', value: snmpTryPublic }) }),
+                    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'VERBOSE_LOGGING', value: verbose }) }),
+                    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'DB_ARCHIVE_ON_BOOT', value: archive }) }),
+                    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'SUBMIT_TELEMETRY', value: telemetry }) }),
+                    // Always false here -- there was never a real
+                    // registration handshake at this point, just a
+                    // choice of whether to kick one off below once setup
+                    // finishes. /api/register/callback is the only place
+                    // that legitimately sets this true, after a genuine
+                    // passkey/magic-link sign-in actually completes.
+                    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'IS_REGISTERED', value: 'false' }) }),
+                    fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'SETUP_COMPLETE', value: 'true' }) })
+                ];
+                if (snmpV3Enabled) {
+                    setupPromises.push(fetch('/api/snmp/v3-identities', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username: snmpV3Username, password: snmpV3Password, priv_password: snmpV3PrivPassword })
+                    }));
+                }
+                await Promise.all(setupPromises);
+                
+                document.getElementById('setup-modal').classList.add('hidden');
+                document.body.style.overflow = 'auto';
+
+                showToast("Setup complete. Initializing network mapping engine...", 'success');
+
+                loadSettings();
+
+                // REG-5 (2026-09-17): must run BEFORE unlockSidebar()
+                // below, not after. unlockSidebar() calls index.html's
+                // forceNavigate('settings.html'), which sets
+                // content_frame.src -- reloading this exact iframe
+                // document, mid-execution, while startRegistration()'s
+                // own await (the /api/register/initiate fetch, then
+                // navigating the already-open registerTab to the real
+                // URL) was still in flight. The reload tore down this
+                // script's JS context before newTab.location could ever
+                // be set, leaving the pre-opened tab stuck on
+                // about:blank forever -- confirmed live: the fetch
+                // itself succeeded server-side, only the tab never
+                // learned where to go. Awaiting registration fully
+                // first means content_frame only reloads once the
+                // popup has already been told its real destination.
+                if (registerNow) {
+                    await startRegistration(registerTab);
+                }
+
+                if (window.parent && window.parent.unlockSidebar) window.parent.unlockSidebar('settings.html');
+            } catch(err) {
+                if (registerTab) registerTab.close();
+                alert("Failed to post configuration to backend API.");
+            }
+        }
+
+        async function startRegistration(existingTab) {
+            // Goes straight to the backend's own sign-in flow (passkey or
+            // email) -- the confirmation modal this used to open first
+            // just re-stated what that page already says, and its own
+            // copy had gone stale (mentioned only the email link, not the
+            // passkey option register.php now offers too).
+            //
+            // REG-4 (2026-09-17): window.open() used to happen AFTER the
+            // await below -- by then most browsers have already dropped
+            // the transient user-activation a synchronous click grants,
+            // so the popup was silently blocked (window.open() returns
+            // null rather than throwing, so the catch never fired either
+            // -- a genuinely silent dead end). Callers that already have
+            // their own reason to delay (executeSetup(), which makes
+            // several real awaits of its own first) open the tab
+            // synchronously at their own point of the original click and
+            // pass it in as existingTab; a direct click on this page's
+            // own Register button (no args) opens it here instead, still
+            // before any await.
+            const newTab = existingTab || window.open('', '_blank');
+            try {
+                // REG-2: the actual handshake starts server-side (state
+                // token + challenge binding). Opened in a real new tab,
+                // NOT window.location.href -- this settings.html itself
+                // runs inside index.html's content_frame iframe, so a
+                // same-window navigation would just redirect the iframe
+                // to netlanvas.com, still cross-origin-embedded. Passkey
+                // sign-in then fails silently: browser extensions like
+                // Bitwarden generally don't inject into cross-origin
+                // iframes at all (confirmed via webauthn_challenges rows
+                // that were created but never consumed -- the ceremony
+                // never even reached the verify endpoint). A genuine
+                // top-level tab has no such restriction.
+                const res = await fetch('/api/register/initiate', { method: 'POST' });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    showToast(`[!] ${body.detail || 'Could not start registration'}`, 'error');
+                    if (newTab) newTab.close();
+                    return;
+                }
+                const data = await res.json();
+                if (newTab) {
+                    newTab.location = data.redirect_url;
+                } else {
+                    window.top.location = data.redirect_url;
+                }
+            } catch(err) {
+                showToast("[!] API Unreachable", 'error');
+                if (newTab) newTab.close();
+            }
+        }
+
+        async function deregisterDevice() {
+            if (!confirm('De-register this device from your account? You can re-register any time, but any active subscription benefit stops applying to this appliance until you do.')) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/register/deregister', { method: 'POST' });
+                const body = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    showToast(`[!] ${body.detail || 'Could not de-register'}`, 'error');
+                    return;
+                }
+                showToast('[*] Device de-registered', 'success');
+                loadSettings();
+            } catch (err) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        function promptAddPasskey() {
+            // Same reasoning as startRegistration() -- adding a passkey
+            // is a real WebAuthn ceremony, which needs to run on
+            // netlanvas.com's own top-level origin, not embedded in this
+            // page's iframe. /account/ already has a working "Add a
+            // passkey" button; just get the user there in a real tab.
+            window.open('https://netlanvas.com/account/', '_blank');
+        }
+
+        async function updateSetting(key, element) {
+            const value = element.type === 'checkbox' ? element.checked.toString() : element.value;
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: key, value: value })
+                });
+                const data = await res.json();
+                if (data.success) { showToast(`[*] Saved: ${key}`, 'success'); } 
+                else { showToast(`[!] Error: ${data.error}`, 'error'); }
+            } catch (err) { showToast(`[!] API Unreachable`, 'error'); }
+        }
+
+        // theme.js (loaded in <head>, before this page's own content)
+        // already applied the current theme by the time this script
+        // runs -- getCurrentTheme() just reads what it landed on,
+        // rather than this page re-fetching /api/settings itself.
+        function refreshThemeButtons() {
+            const current = window.NetLanvasTheme ? window.NetLanvasTheme.getCurrentTheme() : 'dark';
+            const activeClasses = ['bg-blue-600', 'border-blue-500', 'text-white'];
+            const inactiveClasses = ['bg-gray-900', 'border-gray-600', 'text-gray-300', 'hover:bg-gray-700'];
+            ['dark', 'light'].forEach(t => {
+                const btn = document.getElementById(`theme-btn-${t}`);
+                if (!btn) return;
+                btn.classList.remove(...activeClasses, ...inactiveClasses);
+                btn.classList.add(...(t === current ? activeClasses : inactiveClasses));
+            });
+        }
+        document.addEventListener('DOMContentLoaded', refreshThemeButtons);
+
+        async function setUiTheme(theme) {
+            if (!window.NetLanvasTheme) return;
+            try {
+                const res = await window.NetLanvasTheme.setTheme(theme);
+                const data = await res.json();
+                refreshThemeButtons();
+                if (data.success) { showToast(`[*] Theme set to ${theme}`, 'success'); }
+                else { showToast(`[!] Error: ${data.error}`, 'error'); }
+            } catch (err) { showToast(`[!] API Unreachable`, 'error'); }
+        }
+
+        // Polling Schedule: mode buttons mirror refreshThemeButtons'
+        // active/inactive styling exactly. Unlike theme (which theme.js
+        // already applies before this script runs), there's no
+        // client-side cache for polling state, so this fetches
+        // /api/polling/status itself -- called on load and re-polled
+        // every 5s (see the setInterval below) so the remaining-time
+        // countdown and Active/Paused badge stay live without a refresh.
+        let pollingDurationInputFocused = false;
+        document.addEventListener('DOMContentLoaded', () => {
+            const input = document.getElementById('polling-duration-input');
+            if (input) {
+                input.addEventListener('focus', () => pollingDurationInputFocused = true);
+                input.addEventListener('blur', () => pollingDurationInputFocused = false);
+            }
+        });
+
+        // A live status LINE inside the log window itself (not a banner
+        // outside it) -- reuses the same #log-window the SSE stream
+        // writes into, but instead of appending a new <div> each tick
+        // (which would just scroll away like any other line), it creates
+        // ONE element once and re-pins/rewrites it in place, so it always
+        // reads as the current last line without ever scrolling off.
+        // pollingPausedSince comes from the backend's real
+        // _POLLING_PAUSED_AT (via /api/polling/status), not a client-side
+        // clock, so both the "at" time and the "for" counter stay correct
+        // across a page reload.
+        let pollingPausedSince = null;
+        let pollingPausedTickHandle = null;
+
+        function pausedStatusLineText() {
+            const pad = n => String(n).padStart(2, '0');
+            const at = pollingPausedSince;
+            const atStr = `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
+            const totalSeconds = Math.max(0, Math.floor((Date.now() - at.getTime()) / 1000));
+            const h = Math.floor(totalSeconds / 3600);
+            const m = Math.floor((totalSeconds % 3600) / 60);
+            const s = totalSeconds % 60;
+            const forStr = `${pad(h)}:${pad(m)}:${pad(s)}`;
+            return `Polling paused at ${atStr} for ${forStr}`;
+        }
+
+        function renderPausedStatusLine() {
+            if (!pollingPausedSince) return;
+            const logWindow = document.getElementById('log-window');
+            if (!logWindow) return;
+            let el = document.getElementById('polling-pause-status-line');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'polling-pause-status-line';
+                el.className = 'mb-1 text-blue-400 font-bold';
+            }
+            el.textContent = pausedStatusLineText();
+            logWindow.appendChild(el); // re-appending an existing node just moves it -- pins it as the last line
+            logWindow.scrollTop = logWindow.scrollHeight;
+        }
+
+        function removePausedStatusLine() {
+            const el = document.getElementById('polling-pause-status-line');
+            if (el && el.parentNode) el.parentNode.removeChild(el);
+        }
+
+        async function refreshPollingUI() {
+            try {
+                const res = await fetch('/api/polling/status');
+                const data = await res.json();
+
+                const isPaused = data.mode === 'time_limited' && !data.active;
+                if (isPaused && data.paused_at) {
+                    pollingPausedSince = new Date(data.paused_at);
+                    renderPausedStatusLine();
+                    if (!pollingPausedTickHandle) pollingPausedTickHandle = setInterval(renderPausedStatusLine, 1000);
+                } else if (!isPaused) {
+                    if (pollingPausedTickHandle) { clearInterval(pollingPausedTickHandle); pollingPausedTickHandle = null; }
+                    pollingPausedSince = null;
+                    removePausedStatusLine();
+                }
+
+                const activeClasses = ['bg-blue-600', 'border-blue-500', 'text-white'];
+                const inactiveClasses = ['bg-gray-900', 'border-gray-600', 'text-gray-300', 'hover:bg-gray-700'];
+                ['continuous', 'time_limited'].forEach(m => {
+                    const btn = document.getElementById(`polling-mode-btn-${m}`);
+                    if (!btn) return;
+                    btn.classList.remove(...activeClasses, ...inactiveClasses);
+                    btn.classList.add(...(m === data.mode ? activeClasses : inactiveClasses));
+                });
+
+                const durationRow = document.getElementById('polling-duration-row');
+                if (durationRow) durationRow.classList.toggle('hidden', data.mode !== 'time_limited');
+
+                const durationInput = document.getElementById('polling-duration-input');
+                if (durationInput && !pollingDurationInputFocused && data.duration_hours != null) {
+                    durationInput.value = data.duration_hours;
+                }
+
+                const badge = document.getElementById('polling-status-badge');
+                const startBtn = document.getElementById('polling-start-now-btn');
+                if (badge) {
+                    if (data.mode !== 'time_limited') {
+                        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-green-500"></span><span class="text-gray-200">Continuous</span>`;
+                        if (startBtn) startBtn.classList.add('hidden');
+                    } else if (data.active) {
+                        const remaining = data.remaining_hours != null ? data.remaining_hours.toFixed(1) : '?';
+                        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span><span class="text-gray-200">Active -- ${remaining}h remaining</span>`;
+                        // Visible while active too, not just while paused --
+                        // same endpoint (POST /api/polling/start) doubles as
+                        // a manual mid-run reset (fresh tick_counter, fresh
+                        // duration window) for "I just changed something on
+                        // my network, give me a fresh scan now" -- not only
+                        // a way to recover from a pause.
+                        if (startBtn) { startBtn.classList.remove('hidden'); startBtn.textContent = 'Restart Now'; }
+                    } else {
+                        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-gray-500"></span><span class="text-gray-200">Paused</span>`;
+                        if (startBtn) { startBtn.classList.remove('hidden'); startBtn.textContent = 'Start Now'; }
+                    }
+                }
+            } catch (err) { /* transient -- next 5s poll retries */ }
+        }
+        // Deliberately NOT registered unconditionally at script-parse
+        // time (document.addEventListener('DOMContentLoaded', ...)) the
+        // way this originally shipped in v3.15.9 -- /api/polling/status
+        // requires a session, and calling any protected endpoint before
+        // setup/login exists trips auth-guard.js's global 401-handler,
+        // which redirects the whole top-level window to login.html.
+        // Confirmed live 2026-09-11: a genuinely fresh install's setup
+        // wizard would flash up then immediately bounce to login before
+        // an admin account could ever be created -- this is the exact
+        // same bug class already documented in security/middleware.py's
+        // UNAUTHENTICATED_API_PATHS comments (NATIVE-16, 2026-09-02),
+        // just a third occurrence that slipped through. The correct fix
+        // here isn't another allowlist entry -- there's no legitimate
+        // reason to poll this before setup completes anyway, since
+        // main.py's own tick loop doesn't even start until
+        // SETUP_COMPLETE is true. Wiring it into bootstrapSettingsPage()'s
+        // already-gated authenticated branch below instead fixes the
+        // actual mistake rather than patching around the symptom.
+
+        async function setPollingMode(mode) {
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'POLLING_MODE', value: mode })
+                });
+                const data = await res.json();
+                if (data.success) { showToast(`[*] Polling mode set to ${mode}`, 'success'); }
+                else { showToast(`[!] Error: ${data.error}`, 'error'); }
+            } catch (err) { showToast(`[!] API Unreachable`, 'error'); }
+            refreshPollingUI();
+        }
+
+        async function startPollingNow() {
+            const isRestart = document.getElementById('polling-start-now-btn')?.textContent === 'Restart Now';
+            if (isRestart && !confirm("Restart the current scan cycle now? This resets the time-limited run's clock back to the full duration and starts a fresh structural scan -- it doesn't extend or add to time already elapsed.")) return;
+            try {
+                const res = await fetch('/api/polling/start', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'ok') { showToast('[*] Polling started', 'success'); }
+                else { showToast('[!] Failed to start polling', 'error'); }
+            } catch (err) { showToast(`[!] API Unreachable`, 'error'); }
+            refreshPollingUI();
+        }
+
+        async function restartCoreEngine() {
+            if (!confirm("Are you sure you want to restart the core polling engine? It will take effect once the current scan cycle finishes, not instantly.")) return;
+            
+            showToast("Dispatching restart command...", 'success');
+            try {
+                const res = await fetch('/api/system/restart', { method: 'POST' });
+                const data = await res.json();
+                
+                if (data.success) { showToast("[*] Core engine restart initiated successfully.", 'success'); } 
+                else { showToast(`[!] Error: ${data.error || 'Failed to communicate with IPC broker.'}`, 'error'); }
+            } catch (err) { showToast(`[!] API Unreachable. Command failed.`, 'error'); }
+        }
+
+        async function forceTopologyRebuild() {
+            if (!confirm("Are you sure you want to force a complete topology rebuild? This will permanently age-out all inferred locks and trigger a deep re-evaluation on the next cycle.")) return;
+            
+            showToast("Dispatching topology rebuild flag...", 'success');
+            try {
+                const res = await fetch('/api/settings', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'FORCE_TOPOLOGY_REBUILD', value: 'true' })
+                });
+                const data = await res.json();
+                
+                if (data.success) { showToast("[*] Rebuild flagged. Orchestrator will execute on next tick.", 'success'); } 
+                else { showToast(`[!] Error: ${data.error || 'Database operation failed.'}`, 'error'); }
+            } catch (err) { showToast(`[!] API Unreachable. Command failed.`, 'error'); }
+        }
+
+        function createToggle(setting, isDisabled = false) {
+            const isChecked = setting.setting_value.toLowerCase() === 'true';
+            // SUBMIT_TELEMETRY's card shows a friendlier title than the
+            // raw setting key, and gets an actual button (not just a
+            // text link) straight to the Preview page -- this is the
+            // card a returning user actually looks at day-to-day for
+            // this setting. The raw key is still what's sent to
+            // /api/settings either way.
+            const isTelemetry = setting.setting_key === 'SUBMIT_TELEMETRY';
+            const displayTitle = isTelemetry ? 'Community Telemetry' : escapeHTML(setting.setting_key);
+            const telemetryPreviewButton = isTelemetry
+                ? `<a href="telemetry.html" class="inline-block bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-1.5 px-4 rounded shadow transition text-[10px] uppercase tracking-widest mt-2">Preview Sanitised Telemetry</a>`
+                : '';
+            return `
+                <div class="flex justify-between items-center p-3 bg-gray-800 border border-gray-700/50 rounded ${isDisabled ? 'opacity-60 grayscale' : 'hover:bg-gray-700 transition'}">
+                    <div class="pr-4">
+                        <div class="text-sm font-bold ${isDisabled ? 'text-gray-200' : 'text-gray-200'} font-mono">${displayTitle}</div>
+                        <div class="text-[10px] text-gray-200 mt-1">${escapeHTML(setting.description)}</div>
+                        ${telemetryPreviewButton}
+                    </div>
+                    <label class="relative inline-flex items-center ${isDisabled ? 'cursor-not-allowed' : 'cursor-pointer'} flex-shrink-0">
+                        <input type="checkbox" class="sr-only peer" ${isChecked ? 'checked' : ''} ${isDisabled ? 'disabled' : `onchange="updateSetting('${escapeHTML(setting.setting_key)}', this)"`}>
+                        <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all ${isDisabled ? 'peer-checked:bg-blue-900/50' : 'peer-checked:bg-blue-500'}"></div>
+                    </label>
+                </div>
+            `;
+        }
+
+
+        // Fetches the appliance's locally cached entitlement status
+        // (main.py refreshes this every few hours) and returns the
+        // status row's HTML, matching the registration banner's row
+        // shape right above it in loadSettings(). Never throws -- any
+        // failure just falls back to a neutral "couldn't check" row
+        // rather than breaking the rest of the settings page.
+        async function buildSubscriptionRow() {
+            try {
+                const res = await fetch('/api/register/entitlement');
+                const data = await res.json();
+                const entitled = !!data.entitled;
+                const checkedAt = data.checked_at
+                    ? `Last checked ${escapeHTML(new Date(data.checked_at).toLocaleString())}`
+                    : 'Not checked yet';
+                const planLabels = { monthly: 'Monthly', annual: 'Annual', lifetime: 'Lifetime', staff: 'Staff', beta_promo: 'Beta Promo', site_license: 'Site License' };
+                const planLabel = planLabels[data.plan_type] || (entitled ? 'Active' : null);
+
+                return `
+                    <div class="flex justify-between items-center p-3 bg-gray-800 border ${entitled ? 'border-green-900/50' : 'border-gray-700/50'} rounded hover:bg-gray-700 transition mt-3">
+                        <div class="pr-4">
+                            <div class="text-sm font-bold ${entitled ? 'text-green-400' : 'text-gray-200'} font-mono uppercase tracking-wider">${entitled ? 'Active Subscription' : 'Free Plan'}</div>
+                            ${data.email ? `<div class="text-[10px] text-gray-200 mt-1">Logged in as ${escapeHTML(data.email)}</div>` : ''}
+                            <div class="text-[10px] text-gray-200 mt-1">${checkedAt}</div>
+                        </div>
+                        <div class="flex-shrink-0 text-right">
+                            <div class="${entitled ? 'text-green-500' : 'text-gray-200'} font-bold font-mono text-xs uppercase tracking-widest">${entitled ? 'Subscribed' : 'Not Subscribed'}</div>
+                            ${planLabel ? `<div class="text-blue-400 font-bold font-mono text-[10px] uppercase tracking-widest mt-1">${escapeHTML(planLabel)} Plan</div>` : ''}
+                        </div>
+                    </div>
+                    ${data.has_passkey === false ? `
+                    <div class="flex justify-between items-center p-3 bg-gray-800 border border-blue-900/40 rounded hover:bg-gray-700 transition mt-3">
+                        <div class="pr-4">
+                            <div class="text-sm font-bold text-blue-400 font-mono uppercase tracking-wider">Add a Passkey</div>
+                            <div class="text-[10px] text-gray-200 mt-1">Your account signed in with an email link. Add a passkey for instant, one-tap sign-in next time.</div>
+                        </div>
+                        <div class="flex-shrink-0">
+                            <button onclick="promptAddPasskey()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-1.5 px-4 rounded shadow transition text-xs uppercase tracking-widest">Add Passkey</button>
+                        </div>
+                    </div>
+                    ` : ''}
+                    <div class="flex justify-between items-center p-3 bg-gray-800 border border-red-900/40 rounded hover:bg-gray-700 transition mt-3">
+                        <div class="pr-4">
+                            <div class="text-sm font-bold text-red-400 font-mono uppercase tracking-wider">De-register This Device</div>
+                            <div class="text-[10px] text-gray-200 mt-1">Unlinks this appliance from your account. You can re-register any time.</div>
+                        </div>
+                        <div class="flex-shrink-0">
+                            <button onclick="deregisterDevice()" class="border border-red-700 hover:bg-red-900/20 text-red-400 font-bold font-mono py-1.5 px-4 rounded shadow transition text-xs uppercase tracking-widest">De-register</button>
+                        </div>
+                    </div>
+                `;
+            } catch (err) {
+                return `
+                    <div class="flex justify-between items-center p-3 bg-gray-800 border border-gray-700/50 rounded mt-3">
+                        <div class="text-sm font-bold text-gray-200 font-mono uppercase tracking-wider">Subscription status unavailable</div>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadSettings() {
+            try {
+                const res = await fetch('/api/settings');
+                const data = await res.json();
+                
+                let isRegistered = false;
+                let autoUpdateSetting = null;
+
+                // Grid of toggle cards is built separately from the outer
+                // "Appliance Settings" heading/wrapper now -- the
+                // registration/subscription/de-register block renders
+                // above it (see assembly below), so the heading can't be
+                // written until we know where in the string it lands.
+                let toggleGridHtml = '';
+
+                data.settings.forEach(setting => {
+                    if (hiddenKeys.includes(setting.setting_key)) return;
+
+                    if (setting.setting_key === 'IS_REGISTERED') isRegistered = setting.setting_value.toLowerCase() === 'true';
+
+                    // Moved out of the generic Environment Strings list
+                    // into its own dedicated card (snmp-v2c-section),
+                    // matching the SNMP v3 Identities section right next
+                    // to it -- previously buried in the flat key-value
+                    // list at the bottom of the page.
+                    if (setting.setting_key === 'SNMP_COMMUNITY_STRING') {
+                        const communityInput = document.getElementById('snmp-community-input');
+                        if (communityInput) communityInput.value = setting.setting_value;
+                        return;
+                    }
+
+                    // Rendered as one combined card with the Update Now
+                    // button/version status below, not as its own
+                    // generic toggle -- see the Software Updates card
+                    // assembled just before the Appliance Settings grid.
+                    if (setting.setting_key === 'AUTO_UPDATE_APP') { autoUpdateSetting = setting; return; }
+
+                    if (booleanKeys.includes(setting.setting_key)) { toggleGridHtml += createToggle(setting, false); }
+                    else if (readonlyBooleanKeys.includes(setting.setting_key)) { toggleGridHtml += createToggle(setting, true); }
+                    // 2026-09-10: the generic "Environment Strings"
+                    // catch-all (everything not otherwise specially
+                    // handled -- IEEE_OUI_URL, HTTP_USER_AGENT,
+                    // INSTANCE_ID, SESSION_LIFETIME_HOURS, TLS_*,
+                    // IANA_ENTERPRISE_NUMBERS_URL, UI_THEME, etc.) was
+                    // removed from this page entirely -- these settings
+                    // still exist and function normally via config.db,
+                    // just no longer directly editable here. UI_THEME
+                    // has its own dedicated Appearance section above
+                    // instead (reads/writes via window.NetLanvasTheme,
+                    // see theme.js).
+                });
+
+                let regText = isRegistered ? "Thanks for Supporting the Project by Registering" : "Please Support the project by Registering";
+                let regColor = isRegistered ? "text-green-400" : "text-blue-400";
+                let regButton = isRegistered ?
+                    `<span class="text-green-500 font-bold font-mono text-xs uppercase tracking-widest">Registered</span>` :
+                    `<button onclick="startRegistration()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-1.5 px-4 rounded shadow transition text-xs uppercase tracking-widest">Register</button>`;
+
+                // Registration/subscription/de-register renders first,
+                // "Appliance Settings" (heading + toggle grid) after --
+                // account-identity status is the thing worth seeing
+                // first on this page, the toggle knobs come second.
+                let togglesHtml = '<div class="space-y-3">';
+
+                togglesHtml += `
+                    <div class="flex justify-between items-center p-3 bg-gray-800 border ${isRegistered ? 'border-green-900/50' : 'border-blue-900/50'} rounded hover:bg-gray-700 transition">
+                        <div class="pr-4">
+                            <div class="text-sm font-bold ${regColor} font-mono uppercase tracking-wider">${regText}</div>
+                        </div>
+                        <div class="flex-shrink-0">
+                            ${regButton}
+                        </div>
+                    </div>
+                `;
+
+                // Subscription status is only meaningful once a device is
+                // linked to an account -- nothing to check beforehand.
+                // Refreshed periodically appliance-side (see main.py's
+                // maybe_refresh_entitlement), so this can lag reality by
+                // up to a few hours; the checked-at timestamp says so.
+                if (isRegistered) {
+                    togglesHtml += await buildSubscriptionRow();
+                }
+
+                // Auto-update toggle and the Update Now button/version
+                // status live in one combined card (spans both grid
+                // columns) rather than a separate "Software Updates"
+                // section -- they're two controls over the same idea
+                // (keeping the appliance current), not two different
+                // settings areas.
+                let updateCardHtml = '';
+                if (autoUpdateSetting) {
+                    const isChecked = autoUpdateSetting.setting_value.toLowerCase() === 'true';
+                    updateCardHtml = `
+                        <div class="md:col-span-2 p-3 bg-gray-800 border border-gray-700/50 rounded hover:bg-gray-700 transition space-y-3">
+                            <div class="flex justify-between items-center">
+                                <div class="pr-4">
+                                    <div class="text-sm font-bold text-gray-200 font-mono">${escapeHTML(autoUpdateSetting.setting_key)}</div>
+                                    <div class="text-[10px] text-gray-200 mt-1">${escapeHTML(autoUpdateSetting.description)}</div>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input type="checkbox" class="sr-only peer" ${isChecked ? 'checked' : ''} onchange="updateSetting('AUTO_UPDATE_APP', this)">
+                                    <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                                </label>
+                            </div>
+                            <div class="flex justify-between items-center pt-3 border-t border-gray-700/50">
+                                <div id="update-status-text" class="text-sm font-mono text-gray-300">Checking version...</div>
+                                <button onclick="triggerUpdateNow()" id="update-now-btn" class="flex-shrink-0 bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold font-mono py-1.5 px-4 rounded shadow transition text-xs uppercase tracking-widest">Update Now</button>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                togglesHtml += '</div>';
+
+                document.getElementById('settings-container').innerHTML = togglesHtml;
+
+                // Split from the block above (moved 2026-09-10) -- Live
+                // Logs and Appearance now render between the two in the
+                // DOM (see the static sections above), so this can't just
+                // be appended to the same togglesHtml string anymore.
+                let applianceSettingsHtml = '<h2 class="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3 border-b border-gray-700 pb-2">Appliance Settings</h2>';
+                applianceSettingsHtml += `<div class="grid grid-cols-1 md:grid-cols-2 gap-3">${updateCardHtml}<div id="remote-access-card" class="md:col-span-2"></div><div id="scan-interface-card" class="md:col-span-2"></div>${toggleGridHtml}</div>`;
+                document.getElementById('appliance-settings-container').innerHTML = applianceSettingsHtml;
+
+                checkSoftwareUpdateStatus();
+                loadRemoteAccessCard();
+                loadScanInterfaceCard();
+            } catch (err) {
+                document.getElementById('settings-container').innerHTML = `<div class="text-red-500 font-mono">Failed to load configuration API.</div>`;
+            }
+        }
+
+        async function checkSoftwareUpdateStatus() {
+            const statusEl = document.getElementById('update-status-text');
+            if (!statusEl) return;
+            try {
+                const res = await fetch('/api/version/check');
+                const data = await res.json();
+                statusEl.textContent = data.update_available
+                    ? `Running ${data.current_version} -- ${data.latest_version} is available`
+                    : `Running ${data.current_version} (latest)`;
+            } catch (e) {
+                statusEl.textContent = 'Could not check version.';
+            }
+        }
+
+        async function triggerUpdateNow() {
+            const statusEl = document.getElementById('update-status-text');
+            const btn = document.getElementById('update-now-btn');
+            btn.disabled = true;
+            statusEl.textContent = 'Updating -- this can take a few minutes...';
+            try {
+                const res = await fetch('/api/system/update-now', { method: 'POST' });
+                const data = await res.json();
+                statusEl.textContent = data.message || data.error || 'Update request failed.';
+            } catch (e) {
+                statusEl.textContent = 'Could not reach the update service.';
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // NATIVE-13: only ever renders anything on a native install --
+        // /api/settings/remote-access returns applicable:false on a
+        // Docker/container install (already LAN-reachable by
+        // construction), and this just leaves the card empty then.
+        // Fetched separately from the main settings list above since
+        // the URL shown depends on live IP detection at request time,
+        // not just the stored on/off value.
+        async function loadRemoteAccessCard() {
+            const el = document.getElementById('remote-access-card');
+            if (!el) return;
+            try {
+                const res = await fetch('/api/settings/remote-access');
+                const data = await res.json();
+                if (!data.applicable) { el.innerHTML = ''; return; }
+                const isChecked = data.enabled === true;
+                const urlLine = isChecked
+                    ? (data.url
+                        ? `<a href="${escapeHTML(data.url)}" class="text-blue-400 hover:underline" target="_blank">${escapeHTML(data.url)}</a>`
+                        : `<span class="text-amber-500">Could not detect this machine's LAN IP -- check again after the restart.</span>`)
+                    : `<span class="text-gray-200">Only reachable at this machine's own localhost while off.</span>`;
+                el.innerHTML = `
+                    <div class="p-3 bg-gray-800 border border-gray-700/50 rounded hover:bg-gray-700 transition space-y-3">
+                        <div class="flex justify-between items-center">
+                            <div class="pr-4">
+                                <div class="text-sm font-bold text-gray-200 font-mono">ENABLE REMOTE WEB VIEWING</div>
+                                <div class="text-[10px] text-gray-200 mt-1">Reach this appliance's dashboard from other devices on your network over HTTPS, instead of only from this machine. Applying a change restarts the appliance.</div>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                <input type="checkbox" class="sr-only peer" ${isChecked ? 'checked' : ''} onchange="toggleRemoteAccess(this)">
+                                <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                            </label>
+                        </div>
+                        <div class="pt-3 border-t border-gray-700/50 text-sm font-mono">${urlLine}</div>
+                    </div>
+                `;
+            } catch (e) {
+                el.innerHTML = '';
+            }
+        }
+
+        async function toggleRemoteAccess(checkboxEl) {
+            const enabled = checkboxEl.checked;
+            checkboxEl.disabled = true;
+            try {
+                const res = await fetch('/api/settings/remote-access', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+                const data = await res.json();
+                if (data.error) {
+                    alert(data.error);
+                    checkboxEl.checked = !enabled;
+                    checkboxEl.disabled = false;
+                    return;
+                }
+                alert(data.message || 'Setting saved. The appliance is restarting to apply it.');
+                // Deliberately not re-fetching the card here -- the
+                // restart this just triggered means the API is about to
+                // become briefly unreachable anyway, and the new bind
+                // address/URL only exist once it's back up.
+            } catch (e) {
+                alert('Could not reach the appliance to change this setting.');
+                checkboxEl.checked = !enabled;
+                checkboxEl.disabled = false;
+            }
+        }
+
+        // /api/settings/network-interfaces returns supported:false on
+        // Windows/macOS (the override is Linux-only so far), and this
+        // just leaves the card empty then, same pattern as
+        // loadRemoteAccessCard()'s applicable:false handling above. No
+        // restart needed here, unlike remote access -- the backend
+        // re-reads this setting fresh on every discovery tick, so a
+        // saved change takes effect on its own within moments.
+        async function loadScanInterfaceCard() {
+            const el = document.getElementById('scan-interface-card');
+            if (!el) return;
+            try {
+                const [ifaceRes, settingsRes] = await Promise.all([
+                    fetch('/api/settings/network-interfaces'),
+                    fetch('/api/settings'),
+                ]);
+                const ifaceData = await ifaceRes.json();
+                if (!ifaceData.supported) { el.innerHTML = ''; return; }
+                const settingsData = await settingsRes.json();
+                const current = (settingsData.settings || []).find(s => s.setting_key === 'SCAN_INTERFACE_OVERRIDE');
+                const currentValue = current ? current.setting_value : '';
+
+                const options = ['<option value="">Default (auto-detect)</option>'].concat(
+                    (ifaceData.interfaces || []).map(i => {
+                        const label = `${i.name}${i.ipv4 ? ' -- ' + i.ipv4 : ''} (${i.state})`;
+                        const selected = i.name === currentValue ? ' selected' : '';
+                        return `<option value="${escapeHTML(i.name)}"${selected}>${escapeHTML(label)}</option>`;
+                    })
+                );
+
+                el.innerHTML = `
+                    <div class="p-3 bg-gray-800 border border-gray-700/50 rounded hover:bg-gray-700 transition space-y-3">
+                        <div>
+                            <div class="text-sm font-bold text-gray-200 font-mono">POLLING SOURCE INTERFACE</div>
+                            <div class="text-[10px] text-gray-200 mt-1">Scope discovery to a specific network interface instead of the system default route -- for a multi-homed appliance with a separate NIC for the network actually under test. Takes effect on the next tick, no restart needed.</div>
+                        </div>
+                        <select onchange="setScanInterface(this)" class="bg-gray-900 border border-gray-600 text-gray-300 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5">
+                            ${options.join('')}
+                        </select>
+                    </div>
+                `;
+            } catch (e) {
+                el.innerHTML = '';
+            }
+        }
+
+        async function setScanInterface(selectEl) {
+            const value = selectEl.value;
+            selectEl.disabled = true;
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'SCAN_INTERFACE_OVERRIDE', value })
+                });
+                const data = await res.json();
+                if (data.error) { alert(data.error); }
+                else { showToast(value ? `[*] Polling source set to ${value}` : '[*] Polling source reset to default', 'success'); }
+            } catch (e) {
+                alert('Could not reach the appliance to change this setting.');
+            }
+            selectEl.disabled = false;
+        }
+
+        async function checkEngineState() {
+            try {
+                let tick, isPopulated, restartPending;
+
+                // Embedded in index.html's iframe (the normal case): reuse
+                // its already-polled state instead of running a second
+                // independent poll of the same /api/status endpoint every
+                // 2s. Falls back to a direct fetch only when accessed
+                // standalone (e.g. a direct bookmark/URL, no parent page).
+                if (window.parent && window.parent !== window && window.parent.engineState && window.parent.engineState.tick !== undefined) {
+                    ({ tick, isPopulated, restartPending } = window.parent.engineState);
+                } else {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+                    if (data.engine_tick === undefined) return;
+                    tick = data.engine_tick;
+                    isPopulated = data.is_populated === true;
+                    restartPending = data.restart_pending === true;
+                }
+
+                const banner = document.getElementById('restart-pending-banner');
+                if (banner) banner.classList.toggle('hidden', !restartPending);
+
+                const tickDisplay = document.getElementById('log-tick-display');
+                if (tickDisplay) tickDisplay.textContent = `Tick ${tick}`;
+
+                const container = document.getElementById('settings-container');
+                const ops = document.getElementById('operations-section');
+                // Matches index.html's pollEngineTick() gating: once real
+                // topology data exists (is_populated), don't keep locking
+                // this page purely because the tick counter hasn't caught
+                // up yet -- a slow/unresponsive SNMP target extending the
+                // deep-scan phase shouldn't leave Settings inert while the
+                // rest of the UI is already fully usable.
+                if (tick < 2 && !isPopulated) {
+                    if (container) { container.style.pointerEvents = 'none'; container.style.opacity = '0.5'; }
+                    if (ops) { ops.style.pointerEvents = 'none'; ops.style.opacity = '0.5'; }
+                } else {
+                    if (container) { container.style.pointerEvents = 'auto'; container.style.opacity = '1'; }
+                    if (ops) { ops.style.pointerEvents = 'auto'; ops.style.opacity = '1'; }
+                }
+            } catch (e) {}
+        }
+
+        async function initializeLogStream() {
+            const logWindow = document.getElementById('log-window');
+            const logIndicator = document.getElementById('log-indicator');
+            const logStatusText = document.getElementById('log-status-text');
+
+            // Pre-flight check: EventSource cannot be intercepted by
+            // auth-guard.js's fetch wrapper, so if the session is already
+            // gone, do the auth check here via a normal fetch first --
+            // that IS wrapped, and will redirect to login.html on 401
+            // before we ever open a streaming connection that would just
+            // silently fail into "Connection Lost. Retrying..." forever.
+            try {
+                await fetch('/api/status');
+            } catch (e) {
+                // Network-level failure (not a 401) -- fall through and
+                // let EventSource's own onerror handling take it from here.
+            }
+
+            const evtSource = new EventSource('/api/logs/stream');
+
+            evtSource.onopen = function() {
+                logIndicator.classList.replace('bg-yellow-500', 'bg-green-500');
+                logIndicator.classList.remove('animate-pulse');
+                logStatusText.textContent = "Stream Active";
+            };
+
+            evtSource.onmessage = function(e) {
+                if (e.data.trim() === '') return;
+                const line = document.createElement('div');
+                line.className = 'mb-1';
+                
+                const safeData = escapeHTML(e.data);
+                
+                let formattedData = safeData
+                    .replace(/\[INFO\]/g, '<span class="text-blue-400 font-bold">[INFO]</span>')
+                    .replace(/\[WARNING\]/g, '<span class="text-yellow-400 font-bold">[WARNING]</span>')
+                    .replace(/\[ERROR\]/g, '<span class="text-red-500 font-bold">[ERROR]</span>')
+                    .replace(/\[\*\w*\]/g, match => `<span class="text-green-400 font-bold">${match}</span>`);
+
+                line.innerHTML = formattedData;
+                logWindow.appendChild(line);
+
+                logWindow.scrollTop = logWindow.scrollHeight;
+                if (logWindow.children.length > 300) logWindow.removeChild(logWindow.firstChild);
+
+                // A real backend log line just landed underneath the
+                // pinned pause-status line (if one is showing) -- move
+                // it back to the bottom so it stays the last thing visible.
+                if (pollingPausedSince) renderPausedStatusLine();
+            };
+
+            evtSource.onerror = function(e) {
+                logIndicator.classList.replace('bg-green-500', 'bg-red-500');
+                logStatusText.textContent = "Connection Lost. Retrying...";
+            };
+        }
+
+        async function bootstrapSettingsPage() {
+            try {
+                const res = await fetch('/api/setup/status');
+                const data = await res.json();
+                if (!data.setup_complete) {
+                    document.getElementById('setup-modal').classList.remove('hidden');
+                    document.body.style.overflow = 'hidden';
+                    document.getElementById('settings-container').innerHTML = '<div class="text-center text-gray-200 font-mono w-full">Complete initial setup to view configuration.</div>';
+                    // NATIVE-9: a native install has no `docker logs` a user
+                    // could check for the token, so the backend hands it
+                    // straight to this page instead (127.0.0.1-only, see
+                    // security/welcome.py's get_setup_token()) -- pre-fill it
+                    // so there's nothing left to hunt for.
+                    if (data.setup_token) {
+                        const tokenField = document.getElementById('setup-token');
+                        tokenField.value = data.setup_token;
+                        tokenField.readOnly = true;
+                        document.getElementById('setup-token-hint').textContent =
+                            'Filled in automatically for this local install.';
+                    }
+                    return;
+                }
+            } catch (e) {
+                // /api/setup/status not reachable (e.g. not yet implemented
+                // on the backend) -- fall through to the authenticated path
+                // below, matching this page's pre-auth behavior.
+            }
+
+            loadSettings();
+            loadSnmpV3Identities();
+            initializeLogStream();
+            refreshPollingUI();
+            setInterval(refreshPollingUI, 5000);
+            setInterval(checkEngineState, 2000);
+            checkEngineState();
+
+            // REG-3's local callback lands here after a successful device
+            // link -- see /api/register/callback's redirect in server.py.
+            if (new URLSearchParams(window.location.search).get('registered') === '1') {
+                history.replaceState(null, '', window.location.pathname);
+                // startRegistration() opens the sign-in flow in a real new
+                // tab (WebAuthn ceremonies don't reliably work inside the
+                // dashboard's content_frame iframe -- see that function's
+                // comment), so this callback lands here as a standalone
+                // popup tab, not embedded in the sidebar shell. window.opener
+                // is that iframe's own window (window.open() was called
+                // from code running inside it) -- refresh its already-live
+                // settings view directly rather than leaving the user on
+                // this bare, sidebar-less page.
+                if (window.opener && !window.opener.closed) {
+                    try {
+                        if (typeof window.opener.loadSettings === 'function') {
+                            window.opener.loadSettings();
+                        } else {
+                            window.opener.location.reload();
+                        }
+                    } catch (e) {}
+                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#9ca3af;font-family:monospace;font-size:0.9rem;">Device registered. You can close this tab.</div>';
+                    setTimeout(() => window.close(), 1200);
+                } else {
+                    showToast("[*] Device registered and linked to your account.", 'success');
+                }
+            }
+        }
+
+        bootstrapSettingsPage();
+    </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+NetLanvas
+Copyright 2026 Mark Easter
+
+This product includes software developed for the NetLanvas project
+(https://netlanvas.com), licensed under the Apache License, Version 2.0.
+
+================================================================================
+Third-party components bundled in this repository
+================================================================================
+
+The runtime dependencies pulled in via requirements.txt (Python) and go.mod
+(tools/ping_sweep_helper, tools/snmp_helper) are all separately licensed and
+versioned there; none are modified or vendored into this repository's own
+source. Every one of them is permissively licensed (MIT/BSD/Apache-2.0/ISC/
+MPL-2.0) with one exception, called out below.
+
+The following files ARE bundled directly in this repository's own source
+tree (src/ui/vendor/) and retain their own upstream license:
+
+* Tailwind CSS (standalone browser build) -- src/ui/vendor/tailwindcss.js
+  MIT License. https://github.com/tailwindlabs/tailwindcss
+  Includes bundled sub-components with their own preserved license headers
+  (e.g. cssesc by @mathias), visible in the file itself.
+
+* QRCode for JavaScript -- src/ui/vendor/qrcode.min.js
+  MIT License, by davidshimjs. http://www.d-project.com/
+
+================================================================================
+Notable runtime dependency license
+================================================================================
+
+* python-zeroconf (requirements.txt: zeroconf) -- LGPL 2.1
+  https://github.com/jstasiak/python-zeroconf
+  Used as an ordinary installed Python package (mDNS service discovery) via
+  the standard package manager -- not modified, and not statically linked
+  or vendored into this repository's own source. All other direct Python
+  and Go dependencies are permissively licensed (see requirements.txt and
+  the relevant go.mod files for the full, version-pinned list).

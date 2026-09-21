@@ -1,0 +1,43 @@
+<service>
+  <id>NetLanvas</id>
+  <name>NetLanvas</name>
+  <description>NetLanvas network discovery and monitoring appliance.</description>
+  <executable>%BASE%\netlanvas.exe</executable>
+  <workingdirectory>%BASE%</workingdirectory>
+  <startmode>Automatic</startmode>
+  <stoptimeout>15 sec</stoptimeout>
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <!--
+    BUG-25b, added 2026-09-15: keeps the two onfailure actions above
+    from being a one-shot lifetime allowance instead of a per-incident
+    one. Harmless defense in depth, but NOT the actual fix for RESTART
+    not coming back after an app-triggered exit: NATIVE-18 (2026-09-16)
+    found, via the real Windows Application/System event logs, that
+    SCM never even attempts recovery for this app's own clean exits
+    in the first place, regardless of exit code, so this reset period
+    alone was never sufficient. See NATIVE-18's comment in main.py for
+    the actual fix (RESTART is now handled in-process and no longer
+    depends on WinSW/SCM noticing an exit at all). NOTE: this comment
+    previously used a doubled hyphen as punctuation, which the XML
+    spec forbids anywhere inside a comment's content; that broke
+    netlanvas-service.exe's own config parsing outright, confirmed
+    live on Marks-PC via WinSW's own FATAL error citing this exact
+    file and line. Never place two consecutive hyphen characters
+    anywhere in this comment block, including inside quoted examples.
+  -->
+  <resetfailure>1 hour</resetfailure>
+  <logpath>C:\ProgramData\NetLanvas\logs</logpath>
+
+  <env name="NETLANVAS_MODE" value="native" />
+  <env name="NETLANVAS_VERSION" value="v3.20.0" />
+  <env name="DB_PATH" value="C:\ProgramData\NetLanvas\data\network.db" />
+  <env name="NETLANVAS_TLS_DIR" value="C:\ProgramData\NetLanvas\data\tls" />
+  <env name="NETLANVAS_CONFIG_DIR" value="C:\ProgramData\NetLanvas\data\tls" />
+  <env name="NETLANVAS_UI_DIR" value="%BASE%\ui" />
+  <env name="NETLANVAS_PING_SWEEP_HELPER" value="%BASE%\tools\ping_sweep_helper\netlanvas_ping_sweep.exe" />
+  <env name="NETLANVAS_SNMP_HELPER" value="%BASE%\tools\snmp_helper\netlanvas_snmp_helper.exe" />
+  <env name="NETLANVAS_PUBLIC_PORT" value="8899" />
+  <env name="DEMO_MODE" value="false" />
+  <env name="DB_ARCHIVE_ON_BOOT" value="false" />
+</service>

@@ -1,0 +1,34 @@
+# Standalone readiness-check tool -- NOT part of the main NetLanvas
+# stack, run entirely separately. See README.md in this directory for
+# full run instructions on Windows/Mac.
+#
+# Typical use:
+#   docker compose build
+#   docker compose run --rm readiness-check
+#
+# `run`, not `up -d` -- this is a one-shot diagnostic, not a service.
+
+services:
+  readiness-check:
+    build: .
+    environment:
+      # Leave unset to test auto-inference (Stage 1 will report what it
+      # guessed and why); set explicitly once you know your real platform
+      # to skip straight past that guesswork.
+      - NETLANVAS_HOST_OS=${NETLANVAS_HOST_OS:-}
+      # The user SSH was enabled/keyed for on the host -- see README.
+      - READINESS_SSH_USER=${READINESS_SSH_USER:-}
+      - READINESS_SSH_HOST=${READINESS_SSH_HOST:-host.docker.internal}
+      - READINESS_SSH_PORT=${READINESS_SSH_PORT:-22}
+      - READINESS_VERBOSE=${READINESS_VERBOSE:-}
+      # Opt-in only -- see README's "Locking SSH down" section. Confirmed
+      # live this was missing before: setting it in the host shell alone
+      # does nothing, docker compose only forwards env vars listed here.
+      - READINESS_APPLY_LOCKDOWN=${READINESS_APPLY_LOCKDOWN:-}
+      - READINESS_SUBNET_CIDR_SUFFIX=${READINESS_SUBNET_CIDR_SUFFIX:-}
+      - READINESS_SNMP_PROBE_LIMIT=${READINESS_SNMP_PROBE_LIMIT:-}
+    volumes:
+      # Read-only -- this tool only ever needs to present the key, never
+      # write to it. Path on the host is whatever README.md's setup step
+      # generated; override via READINESS_SSH_KEY_HOST_PATH if different.
+      - ${READINESS_SSH_KEY_HOST_PATH:-./netlanvas_readiness_key}:/run/readiness/id_ed25519:ro

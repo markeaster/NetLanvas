@@ -1,0 +1,61 @@
+/* Light/dark theme variables (punch-list item, requested 2026-09-04,
+   built 2026-09-10). Dark is the default and MUST stay pixel-identical
+   to how the app already looked -- these are Tailwind's own stock gray
+   palette values, unmodified, not a redesign.
+
+   theme-config.js remaps Tailwind's `gray` and `cyan` (400/500 only --
+   see that file's own comment for why) color families to reference
+   these variables instead of Tailwind's fixed hex values, so every
+   existing bg-gray-900/text-gray-200/border-gray-700/text-cyan-400
+   class already used across all 14 UI pages picks up the active theme
+   automatically -- zero markup changes needed anywhere else. */
+
+:root {
+    --color-gray-50: #f9fafb;
+    --color-gray-100: #f3f4f6;
+    --color-gray-200: #e5e7eb;
+    --color-gray-300: #d1d5db;
+    --color-gray-400: #9ca3af;
+    --color-gray-500: #6b7280;
+    --color-gray-600: #4b5563;
+    --color-gray-700: #374151;
+    --color-gray-800: #1f2937;
+    --color-gray-900: #111827;
+    --color-cyan-400: #22d3ee;
+    --color-cyan-500: #06b6d4;
+
+    /* Graph UI / FBD View link-speed colours (links.html, fbd.html).
+       Cytoscape's own style API and static legend swatches can't read
+       theme.css's gray/cyan Tailwind remap, so these two get their own
+       named variables instead -- '1 Gbps' (the most common speed) was
+       pure white, chosen to pop against the dark canvas, invisible
+       against a light one; the "unknown speed" default has the same
+       problem one step less severely. Every other speed's colour is
+       saturated enough to hold up unchanged on both backgrounds. */
+    --color-speed-1gbps: #ffffff;
+    --color-speed-unknown: #475569;
+}
+
+/* Light theme values. Chosen by role, not a mechanical inversion of
+   Tailwind's own gray scale: gray-900 is this app's MAIN BACKGROUND
+   class (95 uses), so its light-theme value is the lightest color in
+   this set, not the darkest -- and so on down the scale. A cool
+   slate-tinted neutral, not pure white/black, matching the existing
+   cyan accent's hue family (see UI-1's own "choose neutrals, don't
+   default to them" precedent). */
+[data-theme="light"] {
+    --color-gray-900: #e2e8f0;
+    --color-gray-800: #f1f5f9;
+    --color-gray-700: #cbd5e1;
+    --color-gray-600: #94a3b8;
+    --color-gray-500: #64748b;
+    --color-gray-400: #64748b;
+    --color-gray-300: #475569;
+    --color-gray-200: #0f172a;
+    --color-gray-100: #1e293b;
+    --color-gray-50: #1e293b;
+    --color-cyan-400: #0891b2;
+    --color-cyan-500: #0e7490;
+    --color-speed-1gbps: #1e293b;
+    --color-speed-unknown: #334155;
+}

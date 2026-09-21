@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.netlanvas.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Application Support/NetLanvas/bin/netlanvas</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>/Library/Application Support/NetLanvas/logs/netlanvas.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Application Support/NetLanvas/logs/netlanvas.err.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Library/Application Support/NetLanvas/bin</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>NETLANVAS_MODE</key>
+		<string>native</string>
+		<key>NETLANVAS_VERSION</key>
+		<string>{{VERSION}}</string>
+		<key>DB_PATH</key>
+		<string>/Library/Application Support/NetLanvas/data/network.db</string>
+		<key>NETLANVAS_TLS_DIR</key>
+		<string>/Library/Application Support/NetLanvas/data/tls</string>
+		<key>NETLANVAS_CONFIG_DIR</key>
+		<string>/Library/Application Support/NetLanvas/data/tls</string>
+		<key>NETLANVAS_UI_DIR</key>
+		<string>/Library/Application Support/NetLanvas/bin/ui</string>
+		<key>NETLANVAS_PING_SWEEP_HELPER</key>
+		<string>/Library/Application Support/NetLanvas/bin/tools/ping_sweep_helper/netlanvas_ping_sweep</string>
+		<key>NETLANVAS_SNMP_HELPER</key>
+		<string>/Library/Application Support/NetLanvas/bin/tools/snmp_helper/netlanvas_snmp_helper</string>
+		<key>NETLANVAS_PUBLIC_PORT</key>
+		<string>8899</string>
+		<key>DEMO_MODE</key>
+		<string>false</string>
+		<key>DB_ARCHIVE_ON_BOOT</key>
+		<string>false</string>
+	</dict>
+</dict>
+</plist>

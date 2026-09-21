@@ -1,0 +1,79 @@
+# Web Server & UI API
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+
+# Configuration parsing for settings.yaml
+pyyaml==6.0.3
+
+# Asynchronous SNMP for the network scraper
+pysnmp==7.1.28
+
+# Async HTTP for firing the webhook alerts
+aiohttp==3.14.3
+
+# Synchronous HTTP for telemetry
+requests==2.34.2
+
+httpx==0.28.1
+beautifulsoup4==4.15.0
+
+# Local State Tracking
+redis==8.1.0
+zeroconf==0.150.0
+
+# Authentication (password hashing) -- see src/security/auth.py
+argon2-cffi==25.1.0
+
+# TLS keypair generation -- see src/security/cert_manager.py
+cryptography==50.0.0
+
+# --- Resolved transitive dependencies, pinned for full build
+#     reproducibility (captured via `docker exec netlanvas_api pip
+#     freeze` against a verified working arm64 build -- see punch list
+#     S6). Not directly imported by our code; pulled in automatically by
+#     the packages above. Re-capture and update this whole block
+#     deliberately when bumping any top-level package, rather than
+#     hand-editing individual lines. ---
+aiohappyeyeballs==2.7.1
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+argon2-cffi-bindings==25.1.0
+attrs==26.1.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.0
+click==8.4.2
+frozenlist==1.8.0
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+idna==3.18
+ifaddr==0.2.0
+multidict==6.7.1
+propcache==0.5.2
+pyasn1==0.6.4
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+python-dotenv==1.2.2
+soupsieve==2.9.2
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.7.0
+# NATIVE-3 (WIN-10): pinned bare, this line breaks `pip install -r
+# requirements.txt` outright on Windows (uvloop ships no Windows
+# wheels at all). uvicorn[standard] only ever pulls this in via its
+# own environment-marker-gated extra in the first place -- the marker
+# below just makes that same condition explicit here too, matching
+# what pip already resolves automatically for a *fresh* install
+# (confirmed live in the Phase 0 spike: installing the same top-level
+# packages fresh on real Windows pulled in zero uvloop packages).
+# uvicorn falls back to the stdlib asyncio event loop automatically
+# when uvloop is absent -- no code change needed anywhere for this.
+uvloop==0.22.1 ; sys_platform != "win32"
+watchfiles==1.2.0
+websockets==17.0.1
+yarl==1.24.5

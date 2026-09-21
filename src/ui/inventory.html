@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Inventory</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own bg-gray-900 background instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+        .chevron { transition: transform 0.15s ease; }
+        .expanded .chevron { transform: rotate(180deg); }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+    <main class="w-[90vw] mx-auto p-8">
+        <header class="mb-8 border-b border-gray-800 pb-4 flex justify-between items-end">
+            <div>
+                <h1 class="text-2xl font-bold text-white tracking-widest uppercase">Inventory</h1>
+                <p class="text-xs text-cyan-500 font-mono mt-1">Every device the engine has ever discovered, plus whatever you've confirmed about it -- names/types/asset details here survive a Clean Slate purge</p>
+            </div>
+            <div id="toast" class="hidden font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300"></div>
+        </header>
+
+        <div class="mb-4 flex items-center justify-between gap-3">
+            <input type="text" id="filter-input" placeholder="Filter by name, MAC, vendor, type, location, asset tag, serial..."
+                class="flex-1 max-w-md bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded px-3 py-2 focus:outline-none focus:border-blue-500"
+                oninput="renderList()">
+            <div class="text-[10px] text-gray-400 font-mono uppercase tracking-wider" id="count-label"></div>
+        </div>
+
+        <div id="device-list" class="space-y-3">
+            <div class="text-center text-cyan-500 animate-pulse font-mono w-full">Loading inventory...</div>
+        </div>
+    </main>
+
+    <script>
+        const DEVICE_TYPES = ['Router', 'Switch', 'Access Point', 'Switch / WAP', 'Unmanaged Switch', 'Smart Switch', 'Smart Switch (Unverified)', 'Docker Host', 'Server', 'Printer', 'Endpoint'];
+
+        // amber isn't part of theme.js's gray/cyan remap (it's a semantic
+        // accent, not chrome), so the MAC address text below picks its own
+        // shade per theme -- amber-400/80 (bright, made for a dark card)
+        // read as washed-out/illegible once the card itself went light.
+        function isLightTheme() {
+            return document.documentElement.getAttribute('data-theme') === 'light';
+        }
+
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300 ${type === 'success' ? 'bg-green-900/50 text-green-400 border border-green-500/50' : 'bg-red-900/50 text-red-400 border border-red-500/50'}`;
+            toast.classList.remove('hidden');
+            setTimeout(() => toast.classList.add('hidden'), 3000);
+        }
+
+        // A DOM-safe id (colons aren't legal in an unquoted CSS
+        // selector/id lookup convention used elsewhere here) -- swap
+        // for underscores so document.getElementById() stays simple.
+        const domId = (mac) => mac.replace(/:/g, '_');
+
+        function typeOptionsHTML(current) {
+            const known = new Set(DEVICE_TYPES);
+            let options = DEVICE_TYPES.map(t => `<option value="${t}" ${t === current ? 'selected' : ''}>${t}</option>`).join('');
+            options = `<option value="" ${!current ? 'selected' : ''}>-- Not set --</option>` + options;
+            if (current && !known.has(current)) {
+                options += `<option value="${escapeHTML(current)}" selected>${escapeHTML(current)}</option>`;
+            }
+            return options;
+        }
+
+        // Which MACs currently have their pane open -- kept across
+        // re-renders (after a save, a filter keystroke) so acting on a
+        // card doesn't collapse it out from under you.
+        const expandedMacs = new Set();
+
+        function toggleExpand(mac) {
+            if (expandedMacs.has(mac)) expandedMacs.delete(mac);
+            else expandedMacs.add(mac);
+            renderList();
+        }
+
+        function editableField(id, label, value, type) {
+            const input = type === 'textarea'
+                ? `<textarea id="${id}" rows="2" class="w-full bg-gray-900 border border-gray-600 text-gray-200 text-xs font-mono rounded p-1.5 focus:ring-blue-500 focus:border-blue-500 resize-y">${escapeHTML(value || '')}</textarea>`
+                : `<input type="${type || 'text'}" id="${id}" value="${escapeHTML(value || '')}" class="w-full bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded p-1.5 focus:ring-blue-500 focus:border-blue-500">`;
+            return `<div><label class="block text-[9px] text-cyan-500 uppercase tracking-wider mb-1">${label}</label>${input}</div>`;
+        }
+
+        function lastKnownField(label, value) {
+            return `<div><span class="text-gray-400 uppercase tracking-wider">${label}:</span> <span class="text-gray-200">${escapeHTML(value) || 'N/A'}</span></div>`;
+        }
+
+        // Distinct from lastKnownField: renders as a clickable link when
+        // a web server was actually found (see WEB-1), same "only claim
+        // what was actually verified" spirit as the rest of this grid --
+        // no link, no fabricated URL, just N/A, when nothing's there.
+        function lastKnownWebField(httpHeader, ip) {
+            if (!httpHeader || !ip) return `<div><span class="text-gray-400 uppercase tracking-wider">Web Server:</span> <span class="text-gray-200">N/A</span></div>`;
+            const scheme = httpHeader.split(' | ')[0];
+            return `<div><span class="text-gray-400 uppercase tracking-wider">Web Server:</span> <a href="${scheme}://${escapeHTML(ip)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="text-cyan-400 hover:text-cyan-300 hover:underline" title="${escapeHTML(httpHeader)}">${escapeHTML(httpHeader)}</a></div>`;
+        }
+
+        function renderDeviceCard(d) {
+            const id = domId(d.mac_address);
+            const isOpen = expandedMacs.has(d.mac_address);
+            const displayName = d.user_given_name || d.last_known_hostname || d.last_known_vendor || 'Unnamed Device';
+
+            const seenBadge = d.currently_seen
+                ? `<span class="text-[9px] font-bold uppercase tracking-wider text-white bg-green-600 px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0">Live &middot; ${escapeHTML(d.last_known_ip) || 'no IP'}</span>`
+                : `<span class="text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0">Not currently seen</span>`;
+
+            const summary = [d.last_known_vendor, d.confirmed_device_type || d.last_known_device_type].filter(Boolean).join(' &middot; ');
+
+            const inspectLink = d.node_id
+                ? `<a href="device.html?id=${encodeURIComponent(d.node_id)}" onclick="event.stopPropagation()" class="text-blue-500 hover:text-blue-400 text-[10px] font-mono underline">View live device &rarr;</a>`
+                : '';
+
+            const lastKnownGrid = `
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5 text-[11px] font-mono">
+                    ${lastKnownField('Hostname', d.last_known_hostname)}
+                    ${lastKnownField('Vendor', d.last_known_vendor)}
+                    ${lastKnownField('Type', d.last_known_device_type)}
+                    ${lastKnownField('IP', d.last_known_ip)}
+                    ${lastKnownField('OS', d.last_known_os_family)}
+                    ${lastKnownField('Category', d.category)}
+                    ${lastKnownField('Segment', d.market_segment)}
+                    ${lastKnownField('First Seen', d.first_discovered)}
+                    ${lastKnownField('Last Synced', d.last_synced)}
+                    ${lastKnownWebField(d.last_known_http_header, d.last_known_ip)}
+                </div>`;
+
+            const expandedBody = isOpen ? `
+                <div class="px-4 pb-4 border-t border-gray-700/50 pt-4">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                        ${editableField(`name-${id}`, 'Name', d.user_given_name)}
+                        <div>
+                            <label class="block text-[9px] text-cyan-500 uppercase tracking-wider mb-1">Device Type</label>
+                            <select id="type-${id}" class="w-full bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded p-1.5 focus:ring-blue-500 focus:border-blue-500">
+                                ${typeOptionsHTML(d.confirmed_device_type)}
+                            </select>
+                        </div>
+                        ${editableField(`location-${id}`, 'Location', d.location)}
+                        ${editableField(`asset_tag-${id}`, 'Asset Tag', d.asset_tag)}
+                        ${editableField(`serial_number-${id}`, 'Serial Number', d.serial_number)}
+                        ${editableField(`model-${id}`, 'Model', d.model)}
+                        ${editableField(`purchase_date-${id}`, 'Purchase Date', d.purchase_date, 'date')}
+                        ${editableField(`warranty_expiry-${id}`, 'Warranty Expiry', d.warranty_expiry, 'date')}
+                    </div>
+                    <div class="mb-4">
+                        ${editableField(`notes-${id}`, 'Notes', d.notes, 'textarea')}
+                    </div>
+
+                    <div class="mb-4 pt-3 border-t border-gray-700/50">
+                        <div class="text-[9px] text-purple-400 uppercase tracking-wider mb-2 font-bold">Last Known (Auto-Discovered)</div>
+                        ${lastKnownGrid}
+                    </div>
+
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                        <div class="text-[9px] text-gray-500 font-mono">Record created ${escapeHTML(d.created_at)} &middot; Confirmed fields updated ${escapeHTML(d.updated_at)}</div>
+                        <div class="flex items-center gap-2">
+                            ${inspectLink}
+                            <button onclick="event.stopPropagation(); saveDevice('${d.mac_address}')" class="bg-blue-600 hover:bg-blue-500 text-white font-bold px-3 py-1.5 rounded shadow transition text-xs">Save</button>
+                            <button onclick="event.stopPropagation(); deleteDevice('${d.mac_address}')" class="bg-red-600 hover:bg-red-500 text-white font-bold px-3 py-1.5 rounded shadow transition text-xs">Delete</button>
+                        </div>
+                    </div>
+                </div>` : '';
+
+            return `
+                <div class="bg-gray-800 rounded-lg border border-gray-700 shadow-xl overflow-hidden ${isOpen ? 'expanded' : ''}">
+                    <div class="flex items-center justify-between gap-3 p-4 cursor-pointer hover:bg-gray-700/30 transition" onclick="toggleExpand('${d.mac_address}')">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <svg class="chevron w-4 h-4 text-cyan-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            <div class="min-w-0">
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <span class="font-bold text-gray-200 text-sm truncate">${escapeHTML(displayName)}</span>
+                                    <span class="${isLightTheme() ? 'text-amber-700' : 'text-amber-400/80'} font-mono text-[10px] uppercase">${escapeHTML(d.mac_address)}</span>
+                                </div>
+                                <div class="text-[10px] text-cyan-400 font-mono mt-0.5 truncate">${summary || 'No details yet'}</div>
+                            </div>
+                        </div>
+                        ${seenBadge}
+                    </div>
+                    ${expandedBody}
+                </div>
+            `;
+        }
+
+        window.addEventListener('storage', function (e) {
+            if (e.key === 'netlanvas_ui_theme') renderList();
+        });
+
+        let allDevices = [];
+
+        function matchesFilter(d, needle) {
+            if (!needle) return true;
+            const haystack = [
+                d.mac_address, d.user_given_name, d.confirmed_device_type, d.notes,
+                d.location, d.asset_tag, d.serial_number, d.model,
+                d.last_known_hostname, d.last_known_vendor, d.last_known_device_type,
+                d.category, d.market_segment,
+            ].filter(Boolean).join(' ').toLowerCase();
+            return haystack.includes(needle);
+        }
+
+        function renderList() {
+            const needle = document.getElementById('filter-input').value.trim().toLowerCase();
+            const visible = allDevices.filter(d => matchesFilter(d, needle));
+            const container = document.getElementById('device-list');
+            document.getElementById('count-label').textContent = `${visible.length} of ${allDevices.length}`;
+
+            if (allDevices.length === 0) {
+                container.innerHTML = '<div class="text-center text-cyan-500 font-mono w-full py-8">No devices discovered yet.</div>';
+                return;
+            }
+            if (visible.length === 0) {
+                container.innerHTML = '<div class="text-center text-cyan-500 font-mono w-full py-8">No devices match that filter.</div>';
+                return;
+            }
+            container.innerHTML = visible.map(renderDeviceCard).join('');
+        }
+
+        async function loadInventory() {
+            try {
+                const res = await fetch('/api/inventory');
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                allDevices = data.devices || [];
+                renderList();
+            } catch (e) {
+                console.error('Failed to load inventory', e);
+                document.getElementById('device-list').innerHTML = '<div class="text-red-500 font-mono text-center py-8">Failed to load inventory.</div>';
+            }
+        }
+
+        async function saveDevice(mac) {
+            const id = domId(mac);
+            const val = (field) => document.getElementById(`${field}-${id}`).value.trim();
+            const body = {
+                mac_address: mac,
+                user_given_name: val('name'),
+                confirmed_device_type: val('type'),
+                notes: val('notes'),
+                location: val('location'),
+                asset_tag: val('asset_tag'),
+                serial_number: val('serial_number'),
+                model: val('model'),
+                purchase_date: val('purchase_date'),
+                warranty_expiry: val('warranty_expiry'),
+            };
+            try {
+                const res = await fetch('/api/inventory/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                await loadInventory();
+                showToast('[*] Saved.', 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        async function deleteDevice(mac) {
+            if (!confirm(`Remove this device's entire inventory record (${mac})? Confirmed name/type/notes and asset details are lost -- it reappears with just auto-discovered data next time the network sees it.`)) return;
+            try {
+                const res = await fetch(`/api/inventory/${encodeURIComponent(mac)}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                expandedMacs.delete(mac);
+                await loadInventory();
+                showToast('[*] Removed.', 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        loadInventory();
+    </script>
+</body>
+</html>

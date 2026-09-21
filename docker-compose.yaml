@@ -1,0 +1,230 @@
+networks:
+  netlanvas_internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${NETLANVAS_SUBNET:-172.28.1.0/24}
+
+services:
+  # REDISAUTH-1 (2026-09-21): a one-shot, dependency-free service --
+  # no DB, no Redis, nothing but a filesystem write -- that generates
+  # this install's Redis IPC password on first run and never again.
+  # Exists as its OWN service specifically to break a circular
+  # dependency: netlanvas_core/netlanvas_api both wait on redis being
+  # healthy, but redis's own startup now needs this file to already
+  # exist -- neither of the app containers could generate it
+  # themselves without deadlocking against their own existing
+  # dependency on redis. Reuses netlanvas_core's own image (already
+  # built, has Python) purely to avoid pulling/maintaining a separate
+  # one for a five-line script. entrypoint.sh already execs whatever
+  # `command` is given instead of the real app when one is provided --
+  # see its own trailing if/else -- so this needs no image changes.
+  redis_secrets_init:
+    build:
+      context: .
+      args:
+        NETLANVAS_VERSION: v3.20.0
+    container_name: netlanvas_redis_secrets_init
+    restart: "no"
+    volumes:
+      - ./config:/app/config
+    command:
+      - python3
+      - -c
+      - |
+        import os, secrets
+        p = "/app/config/redis.key"
+        if not os.path.exists(p):
+            with open(p, "w") as f:
+                f.write(secrets.token_hex(32))
+            os.chmod(p, 0o600)
+            print("[*] Redis Secrets Init: generated a new install-unique password.")
+        else:
+            print("[*] Redis Secrets Init: existing password found, leaving it alone.")
+
+  redis:
+    image: redis:alpine
+    container_name: netlanvas_redis
+    restart: unless-stopped
+    networks:
+      netlanvas_internal:
+        ipv4_address: ${REDIS_INTERNAL_IP:-172.28.1.10}
+    volumes:
+      - ./config:/app/config:ro
+    # REDISAUTH-1: reads the password redis_secrets_init generated
+    # (or a prior run already generated -- this file persists across
+    # restarts/upgrades exactly like the TLS cert and device identity
+    # key already do in the same ./config-adjacent host mounts) at
+    # container-start time via this shell wrapper, rather than a
+    # literal baked into the image/compose file. sh -c is evaluated
+    # at runtime, not by docker compose's own ${...} interpolation at
+    # `up` time -- the value never needs to exist before this
+    # container actually starts, unlike an env-var-based approach
+    # would have required.
+    command: >
+      sh -c 'redis-server --requirepass "$(cat /app/config/redis.key)" --save ""'
+    # --save "" disables RDB snapshotting entirely. Redis here is
+    # purely ephemeral pub/sub-style IPC between netlanvas_core and
+    # netlanvas_api (engine tick, TLS SAN publishing) -- nothing
+    # stored in it needs to survive a restart (confirmed by the
+    # existing graceful fallback when a value is missing, e.g. "No
+    # host address published yet"). With no snapshot ever attempted,
+    # the MISCONF/stop-writes-on-bgsave-error failure mode can never
+    # trigger again, for any reason -- this closes the whole class
+    # of problem rather than fixing one specific instance of it.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$(cat /app/config/redis.key)\" ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      redis_secrets_init:
+        condition: service_completed_successfully
+
+  netlanvas_core:
+    build:
+      context: .
+      # Dockerfile's ARG NETLANVAS_VERSION defaults to "unknown" -- only
+      # build_multiarch.sh's registry build passed this explicitly
+      # before, so a locally-built dev/prod deploy (this compose file,
+      # not docker-compose.dist.yaml which pulls the registry image
+      # instead) always showed "unknown" as its own version. Confirmed
+      # live: "running unknown (latest)".
+      # Bump this alongside build_multiarch.sh's own VERSION each
+      # release -- same manual-bump discipline as that script, just a
+      # second place now.
+      args:
+        NETLANVAS_VERSION: v3.20.0
+    container_name: netlanvas_core
+    restart: unless-stopped
+    network_mode: "host"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+      - NET_BIND_SERVICE # LICENSE-1: DHCP sniffer binds UDP/67, a privileged port
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./db:/app/db
+      - ./defaults.json:/app/defaults.json
+      # Read-only: the Community Telemetry Pipeline's submitter.py
+      # (runs in POLLER's own tick loop, see main.py's on_tick_10/
+      # maybe_send_daily wiring) needs to read this install's Ed25519
+      # device identity to sign the submission handshake. Confirmed
+      # live 2026-09-03: without this mount, every submission from
+      # POLLER role failed with "No device identity key at
+      # /app/tls/device_identity.key" -- the key is only ever
+      # generated by API_VIEWER's own boot sequence
+      # (device_identity.ensure_device_identity(), which POLLER never
+      # calls), so POLLER only ever needs read access, never write.
+      - ./tls:/app/tls:ro
+    environment:
+      - NETLANVAS_ROLE=POLLER
+      - TZ=Europe/London
+      - PYTHONPATH=/app/src
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=${REDIS_INTERNAL_IP:-172.28.1.10}
+      - REDIS_PORT=6379
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      redis_secrets_init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  netlanvas_api:
+    build:
+      context: .
+      # Dockerfile's ARG NETLANVAS_VERSION defaults to "unknown" -- only
+      # build_multiarch.sh's registry build passed this explicitly
+      # before, so a locally-built dev/prod deploy (this compose file,
+      # not docker-compose.dist.yaml which pulls the registry image
+      # instead) always showed "unknown" as its own version. Confirmed
+      # live: "running unknown (latest)".
+      # Bump this alongside build_multiarch.sh's own VERSION each
+      # release -- same manual-bump discipline as that script, just a
+      # second place now.
+      args:
+        NETLANVAS_VERSION: v3.20.0
+    container_name: netlanvas_api
+    restart: unless-stopped
+    networks:
+      - netlanvas_internal
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./db:/app/db
+      - ./defaults.json:/app/defaults.json
+      - ./tls:/app/tls
+      - ./caddy:/app/caddy
+    environment:
+      - NETLANVAS_ROLE=API_VIEWER
+      - TZ=Europe/London
+      - PYTHONPATH=/app/src
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=${REDIS_INTERNAL_IP:-172.28.1.10}
+      - REDIS_PORT=6379
+      - NETLANVAS_TLS_EXTRA_SANS=${NETLANVAS_PUBLIC_ADDR:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      redis_secrets_init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: netlanvas_caddy
+    restart: unless-stopped
+    networks:
+      - netlanvas_internal
+    ports:
+      - "8899:8899"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/etc/netlanvas-tls:ro
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      netlanvas_api:
+        condition: service_healthy

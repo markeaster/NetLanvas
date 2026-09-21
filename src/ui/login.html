@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Sign In</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <style>
+        /* position+z-index here is required, not decorative -- without it,
+           body's own bg-gray-900 background paints OVER the negative-z-index
+           watermark below (a well-known CSS stacking-context gotcha: a
+           static, non-positioned parent doesn't form its own stacking
+           context, so a negative-z-index child gets evaluated against the
+           ROOT context instead and ends up hidden behind the parent's own
+           background). This forces body to own its own local context so the
+           paint order resolves correctly: body bg -> watermark -> content. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased min-h-screen flex items-center justify-center">
+    <main class="w-full max-w-sm mx-auto p-8">
+        <div class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl">
+            <h1 class="text-blue-500 font-bold mb-6 uppercase text-sm tracking-wider text-center">Netlanvas</h1>
+
+            <form id="login-form" class="space-y-4">
+                <div>
+                    <label for="username" class="block text-xs text-cyan-400 mb-1">Username</label>
+                    <input type="text" id="username" name="username" autocomplete="username" required
+                        class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="password" class="block text-xs text-cyan-400 mb-1">Password</label>
+                    <input type="password" id="password" name="password" autocomplete="current-password" required
+                        class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500">
+                </div>
+
+                <div id="login-error" class="hidden text-xs text-red-400 border border-red-900/50 bg-red-900/20 rounded px-3 py-2"></div>
+
+                <button type="submit"
+                    class="w-full bg-blue-600 hover:bg-blue-500 transition text-white text-sm font-bold py-2 rounded">
+                    Sign In
+                </button>
+            </form>
+        </div>
+
+        <p class="text-[10px] text-gray-600 text-center mt-4 font-mono">
+            Verify this instance's TLS certificate fingerprint against the value logged at
+            container startup (<code>docker logs netlanvas_api</code>) before trusting this connection.
+        </p>
+    </main>
+
+    <script>
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        const form = document.getElementById('login-form');
+        const errorBox = document.getElementById('login-error');
+
+        form.addEventListener('submit', async (evt) => {
+            evt.preventDefault();
+            errorBox.classList.add('hidden');
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ username, password })
+                });
+
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    errorBox.textContent = escapeHTML(body.detail) || 'Sign in failed.';
+                    errorBox.classList.remove('hidden');
+                    return;
+                }
+
+                // A dismissed update notice shouldn't stay dismissed
+                // forever -- "Remind me later" should mean "later in
+                // this session", not "never again until a newer version
+                // ships". This could be a critical security patch, so
+                // every fresh login re-surfaces it if one's still
+                // pending, even if a previous session dismissed it.
+                try { localStorage.removeItem('netlanvas_update_dismissed_version'); } catch (e) {}
+
+                const params = new URLSearchParams(window.location.search);
+                const requestedRedirect = params.get('redirect');
+                const DEFAULT_REDIRECT = '/dashboard/index.html';
+                let redirectTo = DEFAULT_REDIRECT;
+                if (requestedRedirect) {
+                    // Only allow same-origin, path-only redirects. Reject
+                    // anything that could resolve to a different origin
+                    // (absolute URLs, protocol-relative "//host" URLs, or
+                    // non-http(s) schemes like "javascript:") to prevent
+                    // open-redirect / script-injection via this parameter.
+                    if (
+                        requestedRedirect.startsWith('/') &&
+                        !requestedRedirect.startsWith('//') &&
+                        !requestedRedirect.startsWith('/\\')
+                    ) {
+                        try {
+                            const resolved = new URL(requestedRedirect, window.location.origin);
+                            if (resolved.origin === window.location.origin) {
+                                redirectTo = resolved.pathname + resolved.search + resolved.hash;
+                            }
+                        } catch (e) {
+                            // Malformed value -- fall back to the default.
+                        }
+                    }
+                }
+                window.location.href = redirectTo;
+            } catch (err) {
+                errorBox.textContent = 'Could not reach the server.';
+                errorBox.classList.remove('hidden');
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | Device Inspector</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own bg-gray-900 background instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans antialiased">
+    <main class="w-[90vw] max-w-6xl mx-auto p-8">
+        <header class="mb-8 border-b border-gray-800 pb-4 flex justify-between items-end">
+            <div>
+                <h1 class="text-2xl font-bold text-white tracking-widest uppercase" id="page-title">Device Inspector</h1>
+                <p class="text-xs text-cyan-500 font-mono mt-1">Deep dive analytics and configuration</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <span id="status-badge" class="hidden text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded border"></span>
+                <div id="toast" class="hidden font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300"></div>
+            </div>
+        </header>
+
+        <div id="loading" class="text-center text-cyan-500 animate-pulse font-mono w-full">Loading Device Data...</div>
+        
+        <div id="content-container" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <section class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl self-start">
+                <h2 class="text-blue-500 font-bold mb-4 uppercase text-sm tracking-wider border-b border-gray-700 pb-2">Logical Identity</h2>
+                <form id="update-form" class="space-y-4">
+                    <input type="hidden" id="node-id-field">
+                    <div>
+                        <label class="block text-xs font-mono text-cyan-400 mb-1">Hostname</label>
+                        <input type="text" id="edit-hostname" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2" required>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-mono text-cyan-400 mb-1">Device Type</label>
+                        <select id="edit-type" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                            <option value="Endpoint">Endpoint</option>
+                            <option value="Switch">Switch</option>
+                            <option value="Smart Switch">Smart Switch (No SNMP)</option>
+                            <option value="Router">Router</option>
+                            <option value="Access Point">Access Point</option>
+                            <option value="Unmanaged Switch">Unmanaged Switch</option>
+                            <option value="Docker Host">Docker Host</option>
+                            <option value="Server">Server</option>
+                            <option value="Printer">Printer</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-mono text-cyan-400 mb-1">OS Family (Inferred)</label>
+                        <input type="text" id="display-os" class="bg-gray-900 border border-gray-700 text-cyan-500 text-sm font-mono rounded block w-full p-2 cursor-not-allowed" disabled>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-mono text-cyan-400 mb-1">Weld Confidence</label>
+                        <div class="bg-gray-900 border border-gray-700 text-cyan-400 text-sm font-mono rounded block w-full p-2" id="display-weld"></div>
+                    </div>
+                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-2 px-4 rounded shadow transition mt-4" id="save-btn">Save Identity Changes</button>
+                </form>
+            </section>
+
+            <section class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl self-start">
+                <h2 class="text-green-500 font-bold mb-4 uppercase text-sm tracking-wider border-b border-gray-700 pb-2">Hardware Interfaces</h2>
+                <div id="interfaces-container" class="space-y-4 max-h-[400px] overflow-y-auto pr-2"></div>
+            </section>
+
+            <section id="findings-section" class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl self-start hidden">
+                <h2 class="text-red-500 font-bold mb-4 uppercase text-sm tracking-wider border-b border-gray-700 pb-2">Active Findings</h2>
+                <div id="findings-container" class="space-y-2"></div>
+            </section>
+
+            <section class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl self-start col-span-1 lg:col-span-2">
+                <h2 class="text-purple-500 font-bold mb-4 uppercase text-sm tracking-wider border-b border-gray-700 pb-2">Inventory &amp; Asset Details</h2>
+                <form id="inventory-form">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-mono text-cyan-400 mb-1">Location</label>
+                            <input type="text" id="inv-location" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-mono text-cyan-400 mb-1">Asset Tag</label>
+                            <input type="text" id="inv-asset_tag" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-mono text-cyan-400 mb-1">Serial Number</label>
+                            <input type="text" id="inv-serial_number" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-mono text-cyan-400 mb-1">Model</label>
+                            <input type="text" id="inv-model" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-mono text-cyan-400 mb-1">Purchase Date</label>
+                            <input type="date" id="inv-purchase_date" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-mono text-cyan-400 mb-1">Warranty Expiry</label>
+                            <input type="date" id="inv-warranty_expiry" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                        </div>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-xs font-mono text-cyan-400 mb-1">Notes</label>
+                        <textarea id="inv-notes" rows="2" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2 resize-y"></textarea>
+                    </div>
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                        <div id="inv-last-known" class="text-[10px] text-gray-500 font-mono"></div>
+                        <button type="submit" class="bg-purple-700 hover:bg-purple-600 text-white font-bold font-mono text-xs uppercase tracking-widest py-2 px-5 rounded shadow transition" id="inv-save-btn">Save Asset Details</button>
+                    </div>
+                </form>
+            </section>
+
+            <section id="connected-devices-section" class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl col-span-1 lg:col-span-2 hidden">
+                <h2 class="text-amber-500 font-bold mb-4 uppercase text-sm tracking-wider border-b border-gray-700 pb-2">Connected Devices</h2>
+                <div id="connected-devices-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"></div>
+            </section>
+        </div>
+    </main>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const archiveParam = urlParams.get('archive');
+        const qs = archiveParam ? `?archive=${encodeURIComponent(archiveParam)}` : '';
+        const isArchiveMode = !!archiveParam;
+        let currentPrimaryMac = null;
+
+        const escapeHTML = (str) => {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, match => {
+                const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+                return escapeMap[match];
+            });
+        };
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `font-mono text-xs px-4 py-2 rounded shadow-lg transition-all duration-300 ${type === 'success' ? 'bg-green-900/50 text-green-400 border border-green-500/50' : 'bg-red-900/50 text-red-400 border border-red-500/50'}`;
+            toast.classList.remove('hidden');
+            setTimeout(() => toast.classList.add('hidden'), 3000);
+        }
+
+        function getDeviceWeight(node, gwIp) {
+            if (node.ip_list && node.ip_list.has(gwIp)) return 0;
+            if (['Switch', 'Smart Switch', 'Smart Switch (Unverified)', 'Access Point', 'Router', 'Switch / WAP', 'Unmanaged Switch'].includes(node.device_type)) return 1;
+            return 2;
+        }
+
+        function getBorderColor(weight) {
+            if (weight === 0) return 'border-amber-500 shadow-amber-900/20';
+            if (weight === 1) return 'border-blue-500 shadow-blue-900/20';
+            return 'border-green-500/50 hover:border-green-400';
+        }
+
+        async function loadConnectedDevices(nodeId, deviceType) {
+            const infraTypes = ['Switch', 'Router', 'Access Point', 'Switch / WAP', 'Unmanaged Switch'];
+            if (!infraTypes.includes(deviceType)) return; 
+
+            document.getElementById('connected-devices-section').classList.remove('hidden');
+            const container = document.getElementById('connected-devices-container');
+            container.innerHTML = '<div class="text-cyan-500 font-mono text-sm animate-pulse">Mapping connected topology...</div>';
+
+            try {
+                const [statusRes, topoRes, dashRes] = await Promise.all([
+                    fetch('/api/status' + qs).catch(() => ({ json: () => ({ resolved_gateway: null }) })),
+                    fetch('/api/topology' + qs),
+                    fetch('/api/dashboard_data' + qs)
+                ]);
+                
+                const status = await statusRes.json();
+                const data = await topoRes.json();
+                const dashData = await dashRes.json();
+                const gwIp = status.resolved_gateway;
+
+                const connectedNodesMap = new Map();
+
+                data.topology_edges.forEach(edge => {
+                    let targetId = null;
+                    let portLabel = null;
+                    let linkSpeed = null;
+
+                    if (edge.source_node_id === nodeId) {
+                        targetId = edge.target_node_id;
+                        portLabel = (edge.port_names && edge.port_names.length > 0) ? edge.port_names[0] : edge.ports[0];
+                        linkSpeed = (edge.speeds && edge.speeds.length > 0) ? edge.speeds[0] : 'Unknown';
+                    } else if (edge.target_node_id === nodeId) {
+                        targetId = edge.source_node_id;
+                        portLabel = (edge.port_names && edge.port_names.length > 0) ? (edge.port_names[1] || edge.port_names[0]) : (edge.ports[1] || edge.ports[0]);
+                        linkSpeed = (edge.speeds && edge.speeds.length > 0) ? (edge.speeds[1] || edge.speeds[0]) : 'Unknown';
+                    }
+
+                    if (targetId) {
+                        const nodeInfo = data.nodes.find(n => n.id.toString() === targetId);
+                        if (nodeInfo) {
+                            const ledgerEntries = dashData.endpoint_ledger.filter(e => e.node_id && e.node_id.toString() === targetId);
+                            const nodeProfile = { ...nodeInfo, ip_list: new Set(), mac_address: 'Unknown', vendor: 'Unknown', port_name: portLabel || 'Uplink', link_speed: linkSpeed };
+                            
+                            ledgerEntries.forEach(e => {
+                                if (e.ip_address) nodeProfile.ip_list.add(e.ip_address);
+                                if (e.mac_address) nodeProfile.mac_address = e.mac_address;
+                                if (e.vendor) nodeProfile.vendor = e.vendor;
+                            });
+                            connectedNodesMap.set(targetId, nodeProfile);
+                        }
+                    }
+                });
+
+                const clientMapping = data.client_mapping || {};
+                dashData.endpoint_ledger.forEach(client => {
+                    let mac = client.mac_address ? client.mac_address.toLowerCase() : '';
+                    let mapping = clientMapping[mac];
+                    
+                    if (mapping && mapping.parent_node_id === nodeId) {
+                        let cid = client.node_id ? client.node_id.toString() : 'client_' + mac;
+                        if (!connectedNodesMap.has(cid)) connectedNodesMap.set(cid, { ...client, ip_list: new Set(), port_name: mapping.port_name || mapping.port || '?', link_speed: mapping.link_speed || 'Unknown' });
+                        if (client.ip_address) connectedNodesMap.get(cid).ip_list.add(client.ip_address);
+                    }
+                });
+
+                const connectedNodes = Array.from(connectedNodesMap.values());
+                container.innerHTML = '';
+                
+                if (connectedNodes.length === 0) {
+                    container.innerHTML = '<div class="text-cyan-500 font-mono text-sm col-span-full">No active connected devices detected.</div>';
+                    return;
+                }
+
+                connectedNodes.sort((a, b) => getDeviceWeight(a, gwIp) - getDeviceWeight(b, gwIp));
+
+                connectedNodes.forEach(node => {
+                    const weight = getDeviceWeight(node, gwIp);
+                    let icon = weight === 0 ? '◆' : (weight === 1 ? '▼' : '●');
+                    const osTag = node.os_family ? `<span class="text-[9px] bg-gray-700 text-gray-300 px-1 py-0.5 rounded">${escapeHTML(node.os_family)}</span>` : '';
+                    const speedTag = node.link_speed && node.link_speed !== 'Unknown' ? `<span class="text-[9px] bg-gray-800 text-gray-300 px-1 py-0.5 rounded border border-gray-600">${escapeHTML(node.link_speed)}</span>` : '';
+                    
+                    let ips = Array.from(node.ip_list).filter(ip => ip);
+                    ips.sort((a, b) => (a.startsWith('169.254') && !b.startsWith('169.254')) ? 1 : -1);
+                    const displayIps = ips.join(', ') || 'No IP Allocated';
+                    const targetUrlId = node.node_id || node.id || '';
+                    const link = `device.html?id=${encodeURIComponent(targetUrlId)}${isArchiveMode ? '&archive='+encodeURIComponent(archiveParam) : ''}`;
+
+                    container.insertAdjacentHTML('beforeend', `
+                        <a href="${link}" class="block p-3 bg-gray-900/50 rounded shadow-sm text-xs border-l-4 ${getBorderColor(weight)} hover:bg-gray-800 transition cursor-pointer">
+                            <div class="flex justify-between items-start mb-0.5">
+                                <div class="font-bold text-gray-200 text-sm truncate pr-2">${icon} ${escapeHTML(node.hostname || node.vendor || 'Unknown')}</div>
+                                ${osTag}
+                            </div>
+                            <div class="text-xs font-bold text-cyan-400 italic mb-1 truncate">${escapeHTML(node.vendor || 'Unknown Vendor')}</div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-blue-400 font-mono break-all pr-2">${escapeHTML(displayIps)}</span>
+                                <div class="flex items-center gap-1">
+                                    ${speedTag}
+                                    <span class="text-amber-400 font-bold text-[10px] whitespace-nowrap bg-amber-900/20 px-1.5 py-0.5 border border-amber-800 rounded">${escapeHTML(node.port_name || node.port || '?')}</span>
+                                </div>
+                            </div>
+                            <div class="flex justify-between text-white font-mono text-xs">
+                                <span class="uppercase">${escapeHTML(node.mac_address || 'Unknown MAC')}</span>
+                                <span class="text-sm text-gray-300">${escapeHTML(node.device_type || 'Endpoint')}</span>
+                            </div>
+                        </a>
+                    `);
+                });
+
+            } catch (e) {
+                console.error("Failed to load connected devices:", e);
+                container.innerHTML = '<div class="text-red-500 font-mono text-sm col-span-full">Topology resolution failed.</div>';
+            }
+        }
+
+        async function loadDeviceData() {
+            const params = new URLSearchParams(window.location.search);
+            const nodeId = params.get('id');
+            
+            if (!nodeId) {
+                document.getElementById('loading').textContent = "Error: No Node ID provided in URL.";
+                return;
+            }
+
+            if (isArchiveMode) {
+                document.getElementById('save-btn').disabled = true;
+                document.getElementById('save-btn').classList.replace('bg-blue-600', 'bg-gray-600');
+                document.getElementById('save-btn').classList.replace('hover:bg-blue-500', 'hover:bg-gray-600');
+                document.getElementById('save-btn').textContent = 'Read-Only (Time Machine)';
+                document.getElementById('edit-hostname').disabled = true;
+                document.getElementById('edit-type').disabled = true;
+                document.getElementById('inv-save-btn').disabled = true;
+                document.getElementById('inv-save-btn').classList.replace('bg-purple-700', 'bg-gray-600');
+                document.getElementById('inv-save-btn').classList.replace('hover:bg-purple-600', 'hover:bg-gray-600');
+                document.getElementById('inv-save-btn').textContent = 'Read-Only (Time Machine)';
+                ['inv-location', 'inv-asset_tag', 'inv-serial_number', 'inv-model', 'inv-purchase_date', 'inv-warranty_expiry', 'inv-notes']
+                    .forEach(id => document.getElementById(id).disabled = true);
+            }
+
+            try {
+                const res = await fetch(`/api/node/${nodeId}${qs}`);
+                const result = await res.json();
+
+                if (!result.success) {
+                    document.getElementById('loading').textContent = `Error: ${result.error}`;
+                    return;
+                }
+
+                const data = result.data;
+                
+                document.getElementById('node-id-field').value = data.node_id;
+                document.getElementById('edit-hostname').value = data.hostname || '';
+                
+                const typeSelect = document.getElementById('edit-type');
+                if (Array.from(typeSelect.options).some(opt => opt.value === data.device_type)) {
+                    typeSelect.value = data.device_type;
+                } else {
+                    const newOpt = document.createElement('option');
+                    newOpt.value = data.device_type;
+                    newOpt.textContent = data.device_type;
+                    newOpt.selected = true;
+                    typeSelect.appendChild(newOpt);
+                }
+                
+                document.getElementById('display-os').value = data.os_family || 'Unknown';
+                
+                const displayWeld = document.getElementById('display-weld');
+                displayWeld.textContent = '';
+                let weldColor = 'text-green-400';
+                if (data.weld_confidence < 80) weldColor = 'text-amber-400';
+                if (data.weld_confidence < 50) weldColor = 'text-red-400';
+                const weldSpan = document.createElement('span');
+                weldSpan.className = `${weldColor} font-bold`;
+                weldSpan.textContent = `${data.weld_confidence}%`;
+                displayWeld.appendChild(weldSpan);
+
+                const interfacesDiv = document.getElementById('interfaces-container');
+                interfacesDiv.innerHTML = '';
+                
+                if (data.interfaces && data.interfaces.length > 0) {
+                    data.interfaces.forEach(iface => {
+                        const statusDot = iface.device_status === 'offline'
+                            ? `<span class="w-2 h-2 rounded-full bg-gray-500 inline-block" title="Offline"></span>`
+                            : (iface.device_status ? `<span class="w-2 h-2 rounded-full bg-green-400 inline-block" title="${escapeHTML(iface.device_status)}"></span>` : '');
+                        const flags = [
+                            iface.is_public ? `<span class="text-[9px] bg-amber-900/40 text-amber-400 border border-amber-800 px-1.5 py-0.5 rounded">Public IP</span>` : '',
+                            iface.is_ghost ? `<span class="text-[9px] bg-red-900/40 text-red-400 border border-red-800 px-1.5 py-0.5 rounded">Ghost</span>` : '',
+                        ].filter(Boolean).join(' ');
+
+                        interfacesDiv.insertAdjacentHTML('beforeend', `
+                            <div class="bg-gray-900/50 p-4 rounded border border-gray-700/50">
+                                <div class="flex justify-between items-center mb-3 pb-2 border-b border-gray-700/50">
+                                    <span class="text-blue-400 font-mono font-bold text-sm flex items-center gap-2">${statusDot}${escapeHTML(iface.ip_address || 'No IP Allocated')}</span>
+                                    <span class="text-xs bg-gray-700 px-2 py-0.5 rounded text-gray-300">VLAN ${escapeHTML(iface.vlan_id || 'U')}</span>
+                                </div>
+                                <div class="flex flex-col gap-2 text-xs font-mono text-cyan-400">
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">MAC Address:</span>
+                                        <span class="text-gray-200 uppercase">${escapeHTML(iface.mac_address || 'N/A')}</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">Hardware Vendor:</span>
+                                        <span class="text-gray-200 truncate ml-4">${escapeHTML(iface.vendor || 'N/A')}</span>
+                                    </div>
+                                    ${(iface.category || iface.market_segment) ? `
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">Category:</span>
+                                        <span class="text-purple-400 truncate ml-4">${escapeHTML(iface.category) || 'N/A'}${iface.market_segment ? ` <span class="text-purple-500/70">&middot; ${escapeHTML(iface.market_segment)}</span>` : ''}</span>
+                                    </div>` : ''}
+                                    ${iface.wireless_ssid ? `
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">SSID:</span>
+                                        <span class="text-gray-200 truncate ml-4">${escapeHTML(iface.wireless_ssid)}</span>
+                                    </div>` : ''}
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">Virtual Interface:</span>
+                                        <span class="text-gray-200">${iface.is_virtual ? 'Yes' : 'No'}</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">Discovery Source:</span>
+                                        <span class="text-gray-200 text-right ml-4 truncate" title="${escapeHTML(iface.discovery_source)}">${escapeHTML(iface.discovery_source || 'N/A')}</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">Last Seen:</span>
+                                        <span class="text-gray-200 text-right ml-4">${escapeHTML(iface.last_seen) || 'N/A'}</span>
+                                    </div>
+                                    ${iface.http_header ? `
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">Web Server:</span>
+                                        <a href="${escapeHTML(iface.http_header.split(' | ')[0])}://${escapeHTML(iface.ip_address)}" target="_blank" rel="noopener" class="text-cyan-400 hover:text-cyan-300 hover:underline text-right ml-4 truncate" title="${escapeHTML(iface.http_header)}">${escapeHTML(iface.http_header)}</a>
+                                    </div>` : ''}
+                                    ${iface.snmp_sysobjectid ? `
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-bold">sysObjectID:</span>
+                                        <span class="text-gray-200 text-right ml-4 truncate" title="${escapeHTML(iface.snmp_sysobjectid)}">${escapeHTML(iface.snmp_sysobjectid)}</span>
+                                    </div>` : ''}
+                                    ${flags ? `<div class="flex gap-1 justify-end">${flags}</div>` : ''}
+                                </div>
+                                ${iface.snmp_sysdescr ? `<div class="mt-3 pt-3 border-t border-gray-700/50 text-[10px] text-cyan-500 italic max-h-32 overflow-y-auto leading-relaxed">${escapeHTML(iface.snmp_sysdescr)}</div>` : ''}
+                                ${iface.banner ? `<div class="mt-3 pt-3 border-t border-gray-700/50 text-[10px] text-gray-400 font-mono max-h-24 overflow-y-auto leading-relaxed whitespace-pre-wrap">${escapeHTML(iface.banner)}</div>` : ''}
+                                ${iface.fp_last_updated ? `<div class="mt-2 text-[9px] text-gray-600 font-mono">Fingerprint updated ${escapeHTML(iface.fp_last_updated)}</div>` : ''}
+                            </div>
+                        `);
+                    });
+                } else {
+                    interfacesDiv.innerHTML = '<div class="text-cyan-500 text-sm">No hardware interfaces mapped.</div>';
+                }
+
+                // DEVICE-1: any interface currently online -> the
+                // device as a whole reads as online. All known
+                // interfaces offline (or no device_state row at all
+                // for any of them) -> offline/unknown, shown the same
+                // muted way since there's nothing actionable to tell
+                // them apart from this page.
+                const statusBadge = document.getElementById('status-badge');
+                const anyOnline = data.interfaces.some(i => i.device_status === 'online' || i.device_status === 'new');
+                const anyStatus = data.interfaces.some(i => i.device_status);
+                if (anyStatus) {
+                    statusBadge.textContent = anyOnline ? 'Online' : 'Offline';
+                    statusBadge.className = `text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded border ${anyOnline ? 'text-green-400 border-green-800 bg-green-900/20' : 'text-gray-400 border-gray-700 bg-gray-800'}`;
+                } else {
+                    statusBadge.classList.add('hidden');
+                }
+
+                const SEVERITY_COLORS = {
+                    critical: 'border-red-500 bg-red-900/20 text-red-400',
+                    high: 'border-orange-500 bg-orange-900/20 text-orange-400',
+                    medium: 'border-yellow-500 bg-yellow-900/20 text-yellow-400',
+                    low: 'border-green-500 bg-green-900/20 text-green-400',
+                    info: 'border-blue-500 bg-blue-900/20 text-blue-400',
+                };
+                const findingsSection = document.getElementById('findings-section');
+                const findingsContainer = document.getElementById('findings-container');
+                if (data.findings && data.findings.length > 0) {
+                    findingsSection.classList.remove('hidden');
+                    findingsContainer.innerHTML = data.findings.map(f => `
+                        <div class="p-3 rounded border-l-4 ${SEVERITY_COLORS[f.severity] || SEVERITY_COLORS.info}">
+                            <div class="flex justify-between items-start gap-2 mb-1">
+                                <span class="font-bold text-sm">${escapeHTML(f.finding_type.replace(/_/g, ' '))}</span>
+                                <span class="text-[9px] uppercase tracking-wider font-bold flex-shrink-0">${escapeHTML(f.severity)}</span>
+                            </div>
+                            <div class="text-xs text-gray-300 leading-relaxed">${escapeHTML(f.detail) || ''}</div>
+                            <div class="text-[9px] text-gray-500 font-mono mt-1">Since ${escapeHTML(f.first_detected)} &middot; Last confirmed ${escapeHTML(f.last_confirmed)}</div>
+                        </div>
+                    `).join('');
+                } else {
+                    findingsSection.classList.add('hidden');
+                }
+
+                // Inventory & Asset Details -- keyed by primary_mac, same
+                // convention _persist_inventory_override uses (first
+                // l2_interfaces row for this node_id). A node with no
+                // resolved MAC yet (shouldn't normally happen for
+                // anything reachable from this page) has nothing to save
+                // against -- disable the form rather than let a save
+                // silently fail.
+                const inv = data.inventory || {};
+                document.getElementById('inv-location').value = inv.location || '';
+                document.getElementById('inv-asset_tag').value = inv.asset_tag || '';
+                document.getElementById('inv-serial_number').value = inv.serial_number || '';
+                document.getElementById('inv-model').value = inv.model || '';
+                document.getElementById('inv-purchase_date').value = inv.purchase_date || '';
+                document.getElementById('inv-warranty_expiry').value = inv.warranty_expiry || '';
+                document.getElementById('inv-notes').value = inv.notes || '';
+                const lastKnownParts = [];
+                if (inv.first_discovered) lastKnownParts.push(`First discovered ${inv.first_discovered}`);
+                if (inv.last_synced) lastKnownParts.push(`last synced ${inv.last_synced}`);
+                document.getElementById('inv-last-known').textContent = lastKnownParts.join(' · ');
+                currentPrimaryMac = data.primary_mac || null;
+                if (!currentPrimaryMac && !isArchiveMode) {
+                    document.getElementById('inv-save-btn').disabled = true;
+                    document.getElementById('inv-save-btn').textContent = 'No MAC resolved yet';
+                }
+
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('content-container').classList.remove('hidden');
+
+                loadConnectedDevices(data.node_id.toString(), data.device_type);
+
+            } catch (err) {
+                document.getElementById('loading').textContent = "API Communication Error.";
+            }
+        }
+
+        document.getElementById('update-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (isArchiveMode) return;
+            const nodeId = document.getElementById('node-id-field').value;
+            const hostname = document.getElementById('edit-hostname').value;
+            const deviceType = document.getElementById('edit-type').value;
+
+            try {
+                const res = await fetch('/api/node/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ node_id: parseInt(nodeId), hostname: hostname, device_type: deviceType })
+                });
+                const data = await res.json();
+                if (data.success) { showToast(data.message, 'success'); } 
+                else { showToast(`Error: ${data.error}`, 'error'); }
+            } catch (err) { showToast("Failed to save changes.", 'error'); }
+        });
+
+        document.getElementById('inventory-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (isArchiveMode || !currentPrimaryMac) return;
+            // /api/inventory/update only touches fields present in the
+            // request body -- name/type are deliberately omitted here
+            // (this page saves them separately, via the Logical
+            // Identity form above, against /api/node/update) so saving
+            // asset details can never blank out or silently "confirm"
+            // whatever name/type is currently showing there.
+            const body = {
+                mac_address: currentPrimaryMac,
+                location: document.getElementById('inv-location').value.trim(),
+                asset_tag: document.getElementById('inv-asset_tag').value.trim(),
+                serial_number: document.getElementById('inv-serial_number').value.trim(),
+                model: document.getElementById('inv-model').value.trim(),
+                purchase_date: document.getElementById('inv-purchase_date').value.trim(),
+                warranty_expiry: document.getElementById('inv-warranty_expiry').value.trim(),
+                notes: document.getElementById('inv-notes').value.trim(),
+            };
+            try {
+                const res = await fetch('/api/inventory/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await res.json();
+                if (data.success) { showToast('Asset details saved.', 'success'); }
+                else { showToast(`Error: ${data.error}`, 'error'); }
+            } catch (err) { showToast("Failed to save asset details.", 'error'); }
+        });
+
+        loadDeviceData();
+    </script>
+</body>
+</html>

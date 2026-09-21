@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Netlanvas | FBD Topology</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+    <link rel="shortcut icon" href="assets/favicon.ico">
+    <script src="vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script src="theme.js"></script>
+    <script src="auth-guard.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; background: var(--color-gray-900); height: 100vh; font-family: monospace; }
+        /* position+z-index required so body forms its own stacking context --
+           otherwise the negative-z-index watermark below gets hidden behind
+           body's own background: #0f172a instead of painting above it. */
+        body { position: relative; z-index: 0; }
+        body::before {
+            content: ""; position: fixed; inset: 0;
+            background-image: url('/dashboard/NetLanvas%20Logo.png');
+            background-repeat: no-repeat; background-position: center; background-size: contain;
+            opacity: 0.10; pointer-events: none; z-index: -1;
+        }
+        .fbd-block { background: var(--color-gray-800); border: 2px solid #3b82f6; border-radius: 4px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); display: flex; flex-direction: column; overflow: hidden; transition: all 0.2s; cursor: pointer; }
+        .fbd-block:hover { filter: brightness(1.2); }
+        .fbd-header { padding: 6px 12px; font-weight: bold; font-size: 14px; display: flex; justify-content: space-between; }
+        .fbd-body { display: flex; flex: 1; min-height: 0; }
+        .fbd-data { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 8px; border-right: 1px solid var(--color-gray-700); overflow-y: auto; }
+        .fbd-ports { display: flex; flex-direction: column; justify-content: space-around; min-width: 80px; background: var(--color-gray-900); }
+        .fbd-port-pin { display: flex; justify-content: flex-end; align-items: center; padding: 4px 8px; font-size: 10px; color: var(--color-gray-600); font-weight: bold; position: relative; }
+        .fbd-port-pin::after { content: ''; position: absolute; right: 0; top: 50%; transform: translateY(-50%); width: 6px; height: 2px; }
+
+        .fbd-target-block { background: var(--color-gray-800); border: 2px solid #64748b; border-radius: 4px; display: flex; overflow: hidden; transition: all 0.2s; cursor: pointer; min-height: 40px; }
+        .fbd-target-block:hover { filter: brightness(1.2); transform: translateX(-4px); }
+        .fbd-target-header { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 9px; font-weight: bold; padding: 4px; text-align: center; }
+        .fbd-target-body { padding: 6px 12px; flex: 1; display: flex; flex-direction: column; justify-content: center; }
+        .fbd-target-pin { width: 6px; background: transparent; position: relative; }
+        .fbd-target-pin::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 6px; height: 2px; }
+
+        /* Scrollbar hiding for clean block look */
+        .fbd-data::-webkit-scrollbar { display: none; }
+        .fbd-data { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="text-gray-200 antialiased">
+    <div id="loading" class="absolute inset-0 flex items-center justify-center bg-gray-900 z-50 text-blue-400 font-bold animate-pulse text-xl tracking-widest">BUILDING FBD MATRIX...</div>
+    
+    <div class="w-full h-full flex p-8 relative">
+        <div class="absolute top-4 left-4 text-cyan-500 text-xs tracking-widest uppercase opacity-50 z-0">TIA Portal Mode: IEC 61131-3 FBD Active</div>
+        
+        <!-- Left Column: Primary Block -->
+        <div id="col-left" class="w-[30%] h-full flex items-center justify-center relative z-10"></div>
+        
+        <!-- Center Column: Vector Splines -->
+        <div id="col-center" class="w-[40%] h-full relative z-0">
+            <svg id="spline-canvas" class="absolute inset-0 w-full h-full overflow-visible pointer-events-none"></svg>
+        </div>
+        
+        <!-- Right Column: Secondary Targets -->
+        <div id="col-right" class="w-[30%] h-full flex flex-col justify-around gap-2 relative z-10 overflow-y-auto pr-2"></div>
+    </div>
+
+    <!-- UI Legend (Horizontal Side-by-Side, collapses to a tab until hovered) -->
+    <div id="legend-wrapper" class="absolute bottom-5 left-5 z-20 group">
+        <div class="w-10 h-10 rounded-full bg-gray-800/90 border border-gray-700/60 shadow-2xl backdrop-blur-md flex items-center justify-center text-cyan-400 font-mono font-bold text-base pointer-events-auto select-none cursor-help transition-opacity duration-150 group-hover:opacity-0" title="Legend">?</div>
+        <div id="legend" class="absolute bottom-0 left-0 bg-gray-800/95 border border-gray-700/60 p-4 rounded shadow-2xl font-mono text-xs text-gray-300 backdrop-blur-md select-none flex gap-8 opacity-0 pointer-events-none scale-95 origin-bottom-left transition-all duration-150 group-hover:opacity-100 group-hover:pointer-events-auto group-hover:scale-100">
+        <div>
+            <h3 class="text-gray-200 font-bold mb-3 tracking-widest border-b border-gray-700/80 pb-1.5 text-[10px]">DEVICE TYPES</h3>
+            <div class="flex flex-col gap-2.5">
+                <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#f59e0b] block rounded-sm"></span><span class="text-cyan-400">Core Router / Gateway</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#3b82f6] block rounded-sm"></span><span class="text-cyan-400">Managed Switch</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#a855f7] block rounded-sm"></span><span class="text-cyan-400">Smart Switch (No SNMP)</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#10b981] block rounded-sm"></span><span class="text-cyan-400">Unmanaged Switch</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#06b6d4] block rounded-sm"></span><span class="text-cyan-400">Wireless Access Point</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-4 bg-[#22c55e] block rounded-sm"></span><span class="text-cyan-400">Connected Endpoint</span></div>
+            </div>
+        </div>
+        <div>
+            <h3 class="text-gray-200 font-bold mb-3 tracking-widest border-b border-gray-700/80 pb-1.5 text-[10px]">LINK SPEEDS</h3>
+            <div class="flex flex-col gap-2.5">
+                <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#ef4444] block"></span><span class="text-cyan-400">10 Mbps</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#d946ef] block"></span><span class="text-cyan-400">100 Mbps</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-0.5 block" style="background: var(--color-speed-1gbps);"></span><span class="text-cyan-400">1 Gbps</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#06b6d4] block"></span><span class="text-cyan-400">2.5 Gbps</span></div>
+                <div class="flex items-center gap-3"><span class="w-4 h-0.5 bg-[#22c55e] block"></span><span class="text-cyan-400">10 Gbps</span></div>
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const archiveParam = urlParams.get('archive');
+        const qs = archiveParam ? `?archive=${encodeURIComponent(archiveParam)}` : '';
+        const escapeHTML = (str) => String(str || '').replace(/[&<>'"]/g, match => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[match]));
+
+        let unifiedGraph = { nodes: new Map(), edges: [] };
+        let navHistory = [];
+        let currentStateId = null;
+
+        // See theme.css's --color-speed-1gbps/--color-speed-unknown: '1
+        // Gbps' (the most common link speed) was pure white, invisible
+        // against a light canvas -- same fix as links.html's Graph UI.
+        function themeVar(name) {
+            return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        }
+        function getSpeedColor(speedStr) {
+            if (!speedStr) return themeVar('--color-speed-unknown');
+            if (speedStr.includes('10 Gbps')) return '#22c55e';
+            if (speedStr.includes('2.5 Gbps')) return '#06b6d4';
+            if (speedStr.includes('1 Gbps')) return themeVar('--color-speed-1gbps');
+            if (speedStr.includes('100 Mbps')) return '#d946ef';
+            if (speedStr.includes('10 Mbps')) return '#ef4444';
+            return themeVar('--color-speed-unknown');
+        }
+
+        function getDeviceColor(type) {
+            if (type === 'Router') return '#f59e0b';
+            if (type === 'Switch') return '#3b82f6';
+            if (type === 'Smart Switch' || type === 'Smart Switch (Unverified)') return '#a855f7';
+            if (type === 'Unmanaged Switch') return '#10b981';
+            if (type === 'Access Point' || type === 'Switch / WAP') return '#06b6d4';
+            return '#22c55e'; // Default Endpoint
+        }
+
+        async function fetchTopology() {
+            try {
+                const [statusRes, topoRes, dashRes] = await Promise.all([
+                    fetch('/api/status' + qs), fetch('/api/topology' + qs), fetch('/api/dashboard_data' + qs)
+                ]);
+                const status = await statusRes.json();
+                const data = await topoRes.json();
+                const dash = await dashRes.json();
+
+                const gwIp = status.resolved_gateway;
+                let rootNodeId = null;
+
+                // 1. Process Infrastructure Nodes
+                data.nodes.forEach(n => {
+                    unifiedGraph.nodes.set(n.id.toString(), {
+                        id: n.id.toString(), type: n.device_type, hostname: n.hostname, 
+                        ips: new Set(), mac: 'Hardware Platform', vendor: 'Infrastructure', os: n.os_family || 'N/A'
+                    });
+                });
+
+                // 2. Process Endpoint Ledger
+                dash.endpoint_ledger.forEach(e => {
+                    if (e.ip_address === gwIp && e.node_id) rootNodeId = e.node_id.toString();
+                    
+                    if (e.node_id && unifiedGraph.nodes.has(e.node_id.toString())) {
+                        const n = unifiedGraph.nodes.get(e.node_id.toString());
+                        if (e.ip_address) n.ips.add(e.ip_address);
+                        n.mac = e.mac_address || n.mac;
+                        n.vendor = e.vendor || n.vendor;
+                    } else if (!e.node_id) {
+                        const cid = 'client_' + e.mac_address;
+                        if (!unifiedGraph.nodes.has(cid)) {
+                            unifiedGraph.nodes.set(cid, {
+                                id: cid, type: e.device_type || 'Endpoint', hostname: e.hostname || e.vendor || 'Unknown',
+                                ips: new Set(), mac: e.mac_address, vendor: e.vendor || 'Unknown', os: e.os_family || 'N/A'
+                            });
+                        }
+                        if (e.ip_address) unifiedGraph.nodes.get(cid).ips.add(e.ip_address);
+                    }
+                });
+
+                // 3. Process Infrastructure Edges
+                data.topology_edges.forEach(e => {
+                    let s = e.source_node_id.toString();
+                    let t = e.target_node_id.toString();
+                    let pOut = (e.port_names && e.port_names[0]) ? e.port_names[0] : (e.ports ? e.ports[0] : 'UP');
+                    let pIn = (e.port_names && e.port_names[1]) ? e.port_names[1] : (e.ports && e.ports[1] ? e.ports[1] : 'UP');
+                    let speed = (e.speeds && e.speeds[0]) ? e.speeds[0] : 'Unknown';
+
+                    unifiedGraph.edges.push({ a: s, b: t, pA: pOut, pB: pIn, speed: speed });
+                });
+
+                // 4. Process Endpoint Edges
+                const clientMap = data.client_mapping || {};
+                dash.endpoint_ledger.forEach(e => {
+                    const mac = e.mac_address ? e.mac_address.toLowerCase() : '';
+                    if (clientMap[mac] && clientMap[mac].parent_node_id) {
+                        const pid = clientMap[mac].parent_node_id.toString();
+                        const cid = e.node_id ? e.node_id.toString() : 'client_' + mac;
+                        const port = clientMap[mac].port_name || clientMap[mac].port || 'WLAN';
+                        const speed = clientMap[mac].link_speed || 'Unknown';
+                        unifiedGraph.edges.push({ a: pid, b: cid, pA: port, pB: 'ETH0', speed: speed });
+                    }
+                });
+
+                document.getElementById('loading').classList.add('hidden');
+                
+                if (rootNodeId) { renderFBD(rootNodeId); } 
+                else if (unifiedGraph.nodes.size > 0) { renderFBD(unifiedGraph.nodes.keys().next().value); }
+
+            } catch (err) { console.error("FBD Engine Error:", err); }
+        }
+
+        function renderFBD(nodeId) {
+            currentStateId = nodeId;
+            const node = unifiedGraph.nodes.get(nodeId);
+            if (!node) return;
+
+            const prevId = navHistory.length > 0 ? navHistory[navHistory.length - 1] : null;
+
+            // Resolve Downstream Targets
+            const activeEdges = [];
+            unifiedGraph.edges.forEach(e => {
+                if (e.a === nodeId && e.b !== prevId) activeEdges.push({ target: e.b, port: e.pA, speed: e.speed });
+                else if (e.b === nodeId && e.a !== prevId) activeEdges.push({ target: e.a, port: e.pB, speed: e.speed });
+            });
+
+            // Build Left Block (Primary)
+            const leftCol = document.getElementById('col-left');
+            const ips = Array.from(node.ips).join('<br>') || 'No IP Mapped';
+            const devColor = getDeviceColor(node.type);
+            
+            let portsHtml = '';
+            activeEdges.forEach((e, idx) => {
+                const spdColor = getSpeedColor(e.speed);
+                portsHtml += `<div class="fbd-port-pin" id="pin-out-${idx}">
+                    ${escapeHTML(e.port)}
+                    <style>#pin-out-${idx}::after { background: ${spdColor}; }</style>
+                </div>`;
+            });
+
+            leftCol.innerHTML = `
+                <div class="fbd-block w-full max-h-full" onclick="navigateBack()" style="border-color: ${devColor};">
+                    <div class="fbd-header" style="background-color: ${devColor}20; border-bottom: 2px solid ${devColor}; color: ${devColor};">
+                        <span>${escapeHTML(node.type).toUpperCase()}</span>
+                        <span>[DB: ${escapeHTML(node.id.substring(0,6))}]</span>
+                    </div>
+                    <div class="fbd-body">
+                        <div class="fbd-data">
+                            <div class="text-blue-400 font-bold text-lg leading-tight uppercase tracking-wider">${escapeHTML(node.hostname)}</div>
+                            <div class="text-sm font-bold text-cyan-500 uppercase tracking-widest border-b border-gray-700 pb-2 mb-2">${escapeHTML(node.vendor)}</div>
+
+                            <div class="text-[10px] text-cyan-400 font-bold uppercase">IPv4 Bindings</div>
+                            <div class="text-xs font-mono text-gray-200 mb-2">${ips}</div>
+
+                            <div class="text-[10px] text-cyan-400 font-bold uppercase mt-auto">Hardware MAC</div>
+                            <div class="text-xs font-mono text-gray-200 uppercase">${escapeHTML(node.mac)}</div>
+                            
+                            <div class="text-[10px] text-cyan-400 font-bold uppercase mt-2">OS Architecture</div>
+                            <div class="text-xs font-mono text-gray-300 truncate">${escapeHTML(node.os)}</div>
+                        </div>
+                        <div class="fbd-ports">${portsHtml}</div>
+                    </div>
+                    ${navHistory.length > 0 ? `<div style="background-color: ${devColor}15; color: ${devColor}; border-top: 1px solid ${devColor}50;" class="text-[9px] text-center p-1 tracking-widest uppercase font-bold transition">◀ Click anywhere to return upstream</div>` : ''}
+                </div>
+            `;
+
+            // Build Right Blocks (Secondary)
+            const rightCol = document.getElementById('col-right');
+            rightCol.innerHTML = '';
+
+            activeEdges.forEach((e, idx) => {
+                const targetNode = unifiedGraph.nodes.get(e.target);
+                if (!targetNode) return;
+                
+                const targetIp = Array.from(targetNode.ips)[0] || 'No IP';
+                const speedColor = getSpeedColor(e.speed);
+                const targetDevColor = getDeviceColor(targetNode.type);
+
+                rightCol.insertAdjacentHTML('beforeend', `
+                    <div class="fbd-target-block" onclick="navigateForward('${e.target}')" style="border-color: ${targetDevColor}60;">
+                        <div class="fbd-target-pin" id="pin-in-${idx}">
+                            <style>#pin-in-${idx}::before { background: ${speedColor}; }</style>
+                        </div>
+                        <div class="fbd-target-header" style="background: ${targetDevColor}20; border-right: 2px solid ${targetDevColor}60; color: ${targetDevColor}">${escapeHTML(targetNode.type)}</div>
+                        <div class="fbd-target-body">
+                            <div class="font-bold text-gray-200 text-xs truncate">${escapeHTML(targetNode.hostname)}</div>
+                            <div class="text-[10px] text-cyan-400 font-mono flex justify-between mt-1">
+                                <span>${escapeHTML(targetIp)}</span>
+                            </div>
+                        </div>
+                    </div>
+                `);
+            });
+
+            // Render SVG Splines
+            requestAnimationFrame(() => drawSplines(activeEdges));
+        }
+
+        function drawSplines(activeEdges) {
+            const canvas = document.getElementById('spline-canvas');
+            const canvasRect = canvas.getBoundingClientRect();
+            canvas.innerHTML = '';
+
+            activeEdges.forEach((e, idx) => {
+                const outPin = document.getElementById(`pin-out-${idx}`);
+                const inPin = document.getElementById(`pin-in-${idx}`);
+                if (!outPin || !inPin) return;
+
+                const outRect = outPin.getBoundingClientRect();
+                const inRect = inPin.getBoundingClientRect();
+
+                // Calculate relative to SVG Canvas
+                const startX = outRect.right - canvasRect.left;
+                const startY = outRect.top + (outRect.height / 2) - canvasRect.top;
+                const endX = inRect.left - canvasRect.left;
+                const endY = inRect.top + (inRect.height / 2) - canvasRect.top;
+
+                const cpOffset = (endX - startX) * 0.5;
+                const color = getSpeedColor(e.speed);
+
+                const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                path.setAttribute("d", `M ${startX} ${startY} C ${startX + cpOffset} ${startY}, ${endX - cpOffset} ${endY}, ${endX} ${endY}`);
+                path.setAttribute("stroke", color);
+                path.setAttribute("stroke-width", "2");
+                path.setAttribute("fill", "none");
+                path.setAttribute("class", "transition-all duration-500 ease-in-out opacity-70");
+                
+                canvas.appendChild(path);
+            });
+        }
+
+        function navigateForward(targetId) {
+            if (currentStateId) navHistory.push(currentStateId);
+            renderFBD(targetId);
+        }
+
+        function navigateBack() {
+            if (navHistory.length === 0) return;
+            const targetId = navHistory.pop();
+            renderFBD(targetId);
+        }
+
+        window.addEventListener('resize', () => {
+            if (currentStateId) renderFBD(currentStateId); // Recalculate SVG on resize
+        });
+
+        // Same reasoning as links.html's Graph UI: getSpeedColor() reads
+        // theme.css's CSS variables at render time, but nothing re-renders
+        // on its own when the theme changes in another tab/frame.
+        window.addEventListener('storage', function (e) {
+            if (e.key === 'netlanvas_ui_theme' && currentStateId) renderFBD(currentStateId);
+        });
+
+        fetchTopology();
+    </script>
+</body>
+</html>

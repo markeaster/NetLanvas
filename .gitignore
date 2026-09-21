@@ -1,0 +1,66 @@
+# Ignore Databases & State
+db/*.db
+db/*.db-wal
+db/*.db-shm
+db/archives/
+
+# Ignore Logs
+*.log
+*.log.*
+logs/
+
+# Ignore Python Environments & Caches
+.env
+.venv
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore IDE & Dev Artifacts
+.vscode/
+.idea/
+
+# Ignore Local Config Overrides
+config/settings.yaml
+config/defaults.json
+config/*.db
+
+# Security: generated per-install credential-encryption key
+# (src/security/credential_vault.py) -- never the appliance's source
+config/*.key
+
+# Ignore Ephemeral Storage
+tmp/
+
+# External Payloads & Dumps
+db/oui.txt
+source.txt
+
+# Backup Artifacts & Editor Swaps
+*.bak
+*.swp
+*.tmp
+*~
+
+# Security: Local-only registry credentials
+.registry.env
+
+# Security: Ephemeral TLS keypairs
+tls/
+
+# Prevent Recursive Git Backup Tracking
+.git.backup-*/
+.git-backup-*/
+.bak.*/
+.openrouter.env
+
+# Local Claude Code session state -- not project source
+.claude/
+
+# Ad-hoc local backups (e.g. pre-migration dumps of other machines) --
+# never belongs in the appliance's own source repo
+backups/
+
+# Staging tree for tools/deploy_main_site.sh -- holds working copies of
+# the webhost's marketing-site/accounts PHP, not appliance source
+tools/main_site_stage/

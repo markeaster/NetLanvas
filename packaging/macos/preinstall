@@ -1,0 +1,18 @@
+#!/bin/bash
+# NATIVE-16 (macOS): stop and unload any existing daemon BEFORE the
+# installer's payload overwrites the binary out from under a running
+# process -- the same reasoning as netlanvas.iss's own [UninstallRun]
+# grace period, and the exact bug (files locked by a still-running
+# process during an in-place upgrade) that WinSW's stop-race caused
+# repeatedly on Windows. Best-effort: a fresh install has nothing
+# running yet, so "not loaded" is the expected, silent common case.
+set -e
+
+PLIST="/Library/LaunchDaemons/com.netlanvas.daemon.plist"
+
+if [ -f "$PLIST" ]; then
+    launchctl bootout system "$PLIST" 2>/dev/null || true
+    sleep 1
+fi
+
+exit 0
