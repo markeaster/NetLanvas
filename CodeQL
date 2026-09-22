@@ -1,0 +1,60 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '30 3 * * 0'
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # Go's three helper tools are each their own module (separate
+      # go.mod files), so a single repo-wide `go build ./...` at the
+      # root finds nothing -- each needs building from its own
+      # directory. ping_sweep_helper is Windows/macOS-only by design
+      # (no Linux variant exists; Linux uses the system's own fping
+      # instead), so it needs GOOS set explicitly or this Linux runner
+      # sees zero matching source files.
+      - name: Build Go helper tools
+        if: matrix.build-mode == 'manual'
+        shell: bash
+        run: |
+          cd tools/snmp_helper && go build ./... && cd -
+          cd tools/platform_readiness_check/snmp_helper && go build ./... && cd -
+          cd tools/ping_sweep_helper && GOOS=windows go build ./... && GOOS=darwin go build ./...
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
