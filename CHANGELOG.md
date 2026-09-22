@@ -29,3 +29,12 @@ included here.
   single wired uplink port.
 - DHCP-based hostname discovery now works on native Windows installs
   (previously Linux/Docker only).
+- Enabled full CodeQL static analysis (Go, Python, JavaScript/TypeScript)
+  against this repository via an advanced-setup workflow, since GitHub's
+  automatic setup couldn't build this repo's Go modules. See
+  [`CODE_SCANNING_REVIEW.md`](CODE_SCANNING_REVIEW.md) for the full
+  results and reasoning.
+- Fixed: the DHCP-sniffing poller didn't honor a configured
+  `SCAN_INTERFACE_OVERRIDE` the way every other discovery mechanism
+  already did, so it could capture broadcast traffic on interfaces
+  outside the intended scan scope. Found via the CodeQL run above.

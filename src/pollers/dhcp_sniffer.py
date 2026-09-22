@@ -33,6 +33,7 @@ import socket
 import sqlite3
 import threading
 
+from engine.auto_discovery import bind_socket_to_scan_interface
 from engine.hostname_registry import set_hostname_by_mac, is_usable_hostname, PRIORITY_DHCP
 from security.rate_limit import is_rate_limited, record_attempt
 
@@ -161,6 +162,13 @@ def start_dhcp_sniffer():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # SCOPE-1 (missed here originally -- this file was added later,
+        # during LICENSE-1's scapy replacement, after SCOPE-1 already
+        # scoped every other broadcast/multicast socket to
+        # SCAN_INTERFACE_OVERRIDE). Without this, DHCP broadcast capture
+        # ran on every interface regardless of the configured scan
+        # scope, the same leak SCOPE-1 exists to prevent everywhere else.
+        bind_socket_to_scan_interface(sock)
         sock.bind(("", 67))
     except OSError as e:
         logger.error(f"[!] DHCP Sniffer: failed to start -- {e}")
