@@ -28,6 +28,12 @@ UNAUTHENTICATED_API_PATHS = {
     "/api/auth/login",
     "/api/setup/status",
     "/api/setup/password",
+    # Forgotten-credential recovery -- unauthenticated by necessity,
+    # same reasoning as /api/setup/password above. Real authorization is
+    # the recovery token (plaintext only in a host-filesystem file), not
+    # a session. See security/recovery.py.
+    "/api/recovery/request",
+    "/api/recovery/reset",
     # REG-3's local callback: arrives via a cross-site 302 from
     # netlanvas.com, so netlanvas_session (samesite=strict) is never
     # sent here regardless of whether the admin is logged in. Its real

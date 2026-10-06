@@ -52,17 +52,52 @@ def get_representative_targets(device_types, credential_cache=None):
     for node_id, ip in rows:
         ips_by_node.setdefault(node_id, []).append(ip)
 
+    # Real bug found 2026-09-25, traced from a live "ambiguous
+    # connection" report: a device that moves IP on the SAME subnet
+    # (e.g. DHCP -> static lease) keeps its old IP's credential_cache
+    # entry around from before the move. ips is already most-recent-
+    # first (ORDER BY last_seen DESC above), but the credential-cache
+    # preference loop below ran over the FULL list -- if the new IP
+    # had never been polled yet (no cache entry at all) while the old
+    # one still had a cached WORKING credential from before, the old
+    # one won every time, so the new IP could never get polled, never
+    # get its own cache entry, and this would never self-correct.
+    # Confirmed live: wifi_scraper.py kept writing this AP's WLAN
+    # client records under its old IP, which no longer matched
+    # infrastructure_links' current IP, which is exactly what made
+    # engine/inference_engine.py's dark-matter detection see "clients
+    # present but none explained" and mark the port ambiguous.
+    #
+    # Collapse same-subnet duplicates to the single most-recent IP
+    # BEFORE the credential-cache preference runs, so a stale IP can
+    # never win via a leftover cache hit. Different-subnet IPs for the
+    # same node (genuine multihoming -- this function's own docstring
+    # above, POLL-1) are untouched; the credential-cache preference
+    # still applies normally across those.
+    def _subnet(ip):
+        parts = ip.split(".")
+        return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24" if len(parts) == 4 else ip
+
     targets = []
     for node_id, ips in ips_by_node.items():
+        best_by_subnet = {}
+        order = []
+        for ip in ips:  # already most-recent-first
+            key = _subnet(ip)
+            if key not in best_by_subnet:
+                best_by_subnet[key] = ip
+                order.append(key)
+        candidates = [best_by_subnet[key] for key in order]
+
         chosen = None
         if credential_cache:
-            for ip in ips:
+            for ip in candidates:
                 cached = credential_cache.get(ip)
                 if cached and cached != "UNRESPONSIVE":
                     chosen = ip
                     break
         if chosen is None:
-            chosen = ips[0]
+            chosen = candidates[0]
         targets.append(chosen)
 
     if len(rows) > len(targets):

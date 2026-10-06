@@ -23,7 +23,7 @@ services:
     build:
       context: .
       args:
-        NETLANVAS_VERSION: v3.20.0
+        NETLANVAS_VERSION: v3.30.0
     container_name: netlanvas_redis_secrets_init
     restart: "no"
     volumes:
@@ -98,12 +98,12 @@ services:
       # before, so a locally-built dev/prod deploy (this compose file,
       # not docker-compose.dist.yaml which pulls the registry image
       # instead) always showed "unknown" as its own version. Confirmed
-      # live: "running unknown (latest)".
+      # live (2026-09-02, a lab Raspberry Pi): "running unknown (latest)".
       # Bump this alongside build_multiarch.sh's own VERSION each
       # release -- same manual-bump discipline as that script, just a
       # second place now.
       args:
-        NETLANVAS_VERSION: v3.20.0
+        NETLANVAS_VERSION: v3.30.0
     container_name: netlanvas_core
     restart: unless-stopped
     network_mode: "host"
@@ -157,12 +157,12 @@ services:
       # before, so a locally-built dev/prod deploy (this compose file,
       # not docker-compose.dist.yaml which pulls the registry image
       # instead) always showed "unknown" as its own version. Confirmed
-      # live: "running unknown (latest)".
+      # live (2026-09-02, a lab Raspberry Pi): "running unknown (latest)".
       # Bump this alongside build_multiarch.sh's own VERSION each
       # release -- same manual-bump discipline as that script, just a
       # second place now.
       args:
-        NETLANVAS_VERSION: v3.20.0
+        NETLANVAS_VERSION: v3.30.0
     container_name: netlanvas_api
     restart: unless-stopped
     networks:

@@ -55,7 +55,7 @@ def on_tick_10(config, network_db_path: str, log_start_offset: int) -> None:
         return  # nothing discovered yet this boot -- see maybe_send_daily's identical guard
 
     payload["log_sample"] = log_sampler.get_stored_sample(config)
-    submitter.submit(instance_id, payload)
+    submitter.submit(instance_id, payload, trigger_source="tick10_first_send")
 
 
 def maybe_send_daily(config, network_db_path: str) -> None:
@@ -123,7 +123,7 @@ def maybe_send_daily(config, network_db_path: str) -> None:
     payload["log_sample"] = log_sample
 
     _last_daily_sent_at = now  # throttle on ATTEMPT, not just success -- see docstring above
-    submitter.submit(instance_id, payload)
+    submitter.submit(instance_id, payload, trigger_source="daily_periodic")
 
 
 def should_nag_now(config, is_registered: bool) -> bool:

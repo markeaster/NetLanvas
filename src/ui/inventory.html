@@ -41,7 +41,24 @@
             <input type="text" id="filter-input" placeholder="Filter by name, MAC, vendor, type, location, asset tag, serial..."
                 class="flex-1 max-w-md bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded px-3 py-2 focus:outline-none focus:border-blue-500"
                 oninput="renderList()">
-            <div class="text-[10px] text-gray-400 font-mono uppercase tracking-wider" id="count-label"></div>
+            <div class="flex items-center gap-3 flex-shrink-0">
+                <div id="site-filter-group" class="hidden items-center gap-2">
+                    <label class="text-[10px] text-gray-400 font-mono uppercase tracking-wider" for="site-select">Site</label>
+                    <select id="site-select" onchange="onSiteFilterChange()"
+                        class="bg-gray-900 border border-gray-600 text-gray-200 text-xs font-mono rounded px-2 py-2 focus:outline-none focus:border-blue-500">
+                        <option value="">All Sites</option>
+                    </select>
+                </div>
+                <label class="text-[10px] text-gray-400 font-mono uppercase tracking-wider" for="sort-select">Order by</label>
+                <select id="sort-select" onchange="onSortChange()"
+                    class="bg-gray-900 border border-gray-600 text-gray-200 text-xs font-mono rounded px-2 py-2 focus:outline-none focus:border-blue-500">
+                    <option value="device_type">Device Type</option>
+                    <option value="ip">IP Address</option>
+                    <option value="hostname">Hostname (A-Z)</option>
+                    <option value="recent">Recently Updated</option>
+                </select>
+                <div class="text-[10px] text-gray-400 font-mono uppercase tracking-wider" id="count-label"></div>
+            </div>
         </div>
 
         <div id="device-list" class="space-y-3">
@@ -49,8 +66,117 @@
         </div>
     </main>
 
+    <!-- Site Stamp confirmation popup (design doc Section 3) -- only ever
+         shown when sync is enabled AND this session hasn't confirmed yet.
+         The pre-filled field is editable: confirming it is the only
+         action needed, whether the user just accepts the existing value
+         or changes it right here before confirming. -->
+    <div id="stamp-confirm-modal" class="fixed inset-0 bg-black bg-opacity-70 hidden items-center justify-center z-50">
+        <div class="bg-gray-800 border border-blue-700 rounded-lg p-5 max-w-sm w-full mx-4">
+            <div class="text-sm font-bold text-blue-400 font-mono uppercase tracking-wider mb-2">Confirm the site for this data</div>
+            <input type="text" id="stamp-confirm-input" maxlength="60"
+                class="w-full bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded px-3 py-2 focus:outline-none focus:border-blue-500">
+            <div id="stamp-confirm-error" class="text-[10px] text-red-400 mt-2 hidden"></div>
+            <div class="flex justify-end gap-2 mt-4">
+                <button onclick="cancelStampConfirm()" class="text-xs font-mono uppercase tracking-widest text-gray-400 hover:text-gray-200 px-3 py-1.5">Cancel</button>
+                <button onclick="confirmStampAndRetry()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-1.5 px-4 rounded shadow transition text-xs uppercase tracking-widest">OK to stamp / sync</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const DEVICE_TYPES = ['Router', 'Switch', 'Access Point', 'Switch / WAP', 'Unmanaged Switch', 'Smart Switch', 'Smart Switch (Unverified)', 'Docker Host', 'Server', 'Printer', 'Endpoint'];
+
+        // Ordering requested directly: routers, switches, smart switches,
+        // unmanaged switches, servers, docker hosts, endpoints -- the types
+        // not explicitly named (Access Point/Switch/WAP, the Unverified
+        // smart-switch variant, Printer) are filed next to their nearest
+        // named relative rather than left to sort arbitrarily.
+        const DEVICE_TYPE_ORDER = [
+            'Router',
+            'Switch', 'Switch / WAP', 'Access Point',
+            'Smart Switch', 'Smart Switch (Unverified)',
+            'Unmanaged Switch',
+            'Server',
+            'Docker Host',
+            'Printer',
+            'Endpoint',
+        ];
+        function deviceTypeRank(d) {
+            const type = d.confirmed_device_type || d.last_known_device_type;
+            const idx = DEVICE_TYPE_ORDER.indexOf(type);
+            return idx === -1 ? DEVICE_TYPE_ORDER.length : idx; // unset/unrecognized -- last
+        }
+
+        // a.b.c.d -> a single comparable number; missing/unparseable IPs
+        // sort after every real one rather than throwing off the order.
+        function ipSortKey(ip) {
+            if (!ip) return Infinity;
+            const parts = ip.split('.').map(Number);
+            if (parts.length !== 4 || parts.some(p => Number.isNaN(p))) return Infinity;
+            return parts[0] * 16777216 + parts[1] * 65536 + parts[2] * 256 + parts[3];
+        }
+
+        function deviceDisplayName(d) {
+            return d.user_given_name || d.last_known_hostname || d.last_known_vendor || 'Unnamed Device';
+        }
+
+        const SORT_COMPARATORS = {
+            device_type: (a, b) => deviceTypeRank(a) - deviceTypeRank(b) || ipSortKey(a.last_known_ip) - ipSortKey(b.last_known_ip),
+            ip: (a, b) => ipSortKey(a.last_known_ip) - ipSortKey(b.last_known_ip),
+            hostname: (a, b) => deviceDisplayName(a).localeCompare(deviceDisplayName(b), undefined, { sensitivity: 'base' }),
+            recent: (a, b) => (b.last_synced || b.updated_at || '').localeCompare(a.last_synced || a.updated_at || ''),
+        };
+        const SORT_STORAGE_KEY = 'netlanvas_inventory_sort';
+
+        function onSortChange() {
+            try { localStorage.setItem(SORT_STORAGE_KEY, document.getElementById('sort-select').value); } catch (err) { /* per-viewer convenience only */ }
+            renderList();
+        }
+
+        // Only meaningful once Multi-Site / Appliance Inventory Cloud Sync
+        // has actually pulled in a second site's devices -- site_stamp is
+        // null for every device on a single-site, sync-disabled install
+        // (the common case), so the whole control stays hidden rather than
+        // showing a dropdown with nothing real to filter on.
+        const SITE_FILTER_STORAGE_KEY = 'netlanvas_inventory_site_filter';
+        const UNSTAMPED_SITE_VALUE = '__unstamped__';
+
+        function populateSiteFilter() {
+            const distinct = new Set(allDevices.map(d => d.site_stamp || UNSTAMPED_SITE_VALUE));
+            const group = document.getElementById('site-filter-group');
+            if (distinct.size <= 1) {
+                group.classList.add('hidden');
+                group.classList.remove('flex');
+                return;
+            }
+            const select = document.getElementById('site-select');
+            let current = select.value;
+            if (!current) {
+                try { current = localStorage.getItem(SITE_FILTER_STORAGE_KEY) || ''; } catch (err) { /* per-viewer convenience only */ }
+            }
+            const sites = [...distinct].filter(s => s !== UNSTAMPED_SITE_VALUE).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+            let options = '<option value="">All Sites</option>';
+            options += sites.map(s => `<option value="${escapeHTML(s)}">${escapeHTML(s)}</option>`).join('');
+            if (distinct.has(UNSTAMPED_SITE_VALUE)) {
+                options += `<option value="${UNSTAMPED_SITE_VALUE}">Unstamped / Local Only</option>`;
+            }
+            select.innerHTML = options;
+            if ([...select.options].some(o => o.value === current)) select.value = current;
+            group.classList.remove('hidden');
+            group.classList.add('flex');
+        }
+
+        function onSiteFilterChange() {
+            try { localStorage.setItem(SITE_FILTER_STORAGE_KEY, document.getElementById('site-select').value); } catch (err) { /* per-viewer convenience only */ }
+            renderList();
+        }
+
+        function matchesSite(d, siteFilter) {
+            if (!siteFilter) return true;
+            const site = d.site_stamp || UNSTAMPED_SITE_VALUE;
+            return site === siteFilter;
+        }
 
         // amber isn't part of theme.js's gray/cyan remap (it's a semantic
         // accent, not chrome), so the MAC address text below picks its own
@@ -126,11 +252,11 @@
         function renderDeviceCard(d) {
             const id = domId(d.mac_address);
             const isOpen = expandedMacs.has(d.mac_address);
-            const displayName = d.user_given_name || d.last_known_hostname || d.last_known_vendor || 'Unnamed Device';
+            const displayName = deviceDisplayName(d);
 
             const seenBadge = d.currently_seen
                 ? `<span class="text-[9px] font-bold uppercase tracking-wider text-white bg-green-600 px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0">Live &middot; ${escapeHTML(d.last_known_ip) || 'no IP'}</span>`
-                : `<span class="text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0">Not currently seen</span>`;
+                : `<span class="text-[9px] uppercase tracking-wider text-gray-400 border border-gray-700 px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0">Not currently seen${d.last_known_ip ? ` &middot; last IP ${escapeHTML(d.last_known_ip)}` : ''}</span>`;
 
             const summary = [d.last_known_vendor, d.confirmed_device_type || d.last_known_device_type].filter(Boolean).join(' &middot; ');
 
@@ -147,6 +273,7 @@
                     ${lastKnownField('OS', d.last_known_os_family)}
                     ${lastKnownField('Category', d.category)}
                     ${lastKnownField('Segment', d.market_segment)}
+                    ${lastKnownField('Site', d.site_stamp)}
                     ${lastKnownField('First Seen', d.first_discovered)}
                     ${lastKnownField('Last Synced', d.last_synced)}
                     ${lastKnownWebField(d.last_known_http_header, d.last_known_ip)}
@@ -227,7 +354,10 @@
 
         function renderList() {
             const needle = document.getElementById('filter-input').value.trim().toLowerCase();
-            const visible = allDevices.filter(d => matchesFilter(d, needle));
+            const sortKey = document.getElementById('sort-select').value;
+            const siteFilter = document.getElementById('site-select').value;
+            const visible = allDevices.filter(d => matchesFilter(d, needle) && matchesSite(d, siteFilter));
+            visible.sort(SORT_COMPARATORS[sortKey] || SORT_COMPARATORS.recent);
             const container = document.getElementById('device-list');
             document.getElementById('count-label').textContent = `${visible.length} of ${allDevices.length}`;
 
@@ -251,6 +381,7 @@
                     return;
                 }
                 allDevices = data.devices || [];
+                populateSiteFilter();
                 renderList();
             } catch (e) {
                 console.error('Failed to load inventory', e);
@@ -280,6 +411,10 @@
                     body: JSON.stringify(body),
                 });
                 const data = await res.json();
+                if (data.error === 'stamp_confirmation_required') {
+                    showStampConfirmModal(data.current_stamp || '', mac);
+                    return;
+                }
                 if (data.error) {
                     showToast(`[!] ${data.error}`, 'error');
                     return;
@@ -288,6 +423,56 @@
                 showToast('[*] Saved.', 'success');
             } catch (e) {
                 showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        // Site Stamp confirmation popup (design doc Section 3). Stores
+        // which device's save is pending so confirming the Stamp can
+        // transparently retry it -- one interaction either way, no
+        // separate "try saving again" step for the user.
+        let _stampPendingMac = null;
+
+        function showStampConfirmModal(currentStamp, mac) {
+            _stampPendingMac = mac;
+            const modal = document.getElementById('stamp-confirm-modal');
+            const input = document.getElementById('stamp-confirm-input');
+            const errorEl = document.getElementById('stamp-confirm-error');
+            input.value = currentStamp;
+            errorEl.classList.add('hidden');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            input.focus();
+        }
+
+        function cancelStampConfirm() {
+            _stampPendingMac = null;
+            const modal = document.getElementById('stamp-confirm-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+
+        async function confirmStampAndRetry() {
+            const input = document.getElementById('stamp-confirm-input');
+            const errorEl = document.getElementById('stamp-confirm-error');
+            const stampText = input.value;
+            try {
+                const res = await fetch('/api/stamp/confirm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ stamp_text: stampText }),
+                });
+                const data = await res.json();
+                if (data.error) {
+                    errorEl.textContent = data.error;
+                    errorEl.classList.remove('hidden');
+                    return;
+                }
+                const mac = _stampPendingMac;
+                cancelStampConfirm();
+                if (mac) await saveDevice(mac);
+            } catch (e) {
+                errorEl.textContent = 'Could not reach this appliance. Please try again.';
+                errorEl.classList.remove('hidden');
             }
         }
 
@@ -307,6 +492,11 @@
                 showToast('[!] API Unreachable', 'error');
             }
         }
+
+        try {
+            const savedSort = localStorage.getItem(SORT_STORAGE_KEY);
+            if (savedSort && SORT_COMPARATORS[savedSort]) document.getElementById('sort-select').value = savedSort;
+        } catch (err) { /* per-viewer convenience only -- default selection stands */ }
 
         loadInventory();
     </script>

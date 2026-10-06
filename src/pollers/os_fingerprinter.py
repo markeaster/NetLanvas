@@ -3,9 +3,12 @@ import logging
 import sqlite3
 import os
 import socket
+import urllib.request
+import xml.etree.ElementTree as ET
 from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser, AsyncServiceInfo
 from engine.hostname_registry import set_hostname_by_node_id, PRIORITY_MDNS
 from engine.auto_discovery import bind_socket_to_scan_interface, scan_interface_ip_for_zeroconf
+from engine.oui_manager import VENDOR_PLACEHOLDER_VALUES
 
 logger = logging.getLogger("Netlanvas.OS_Profiler")
 DB_PATH = os.getenv("DB_PATH", "/app/db/network.db")
@@ -73,6 +76,102 @@ MODEL_TXT_KEYS = [
 #           "amzn.dmgr:<hash>:<hash>:<port>" string, useless as a
 #           hostname on its own.
 FRIENDLY_NAME_TXT_KEYS = ["fn", "n"]
+
+# VENDOR-XFEED-1 (2026-09-24): a self-reported VENDOR is a different
+# signal from _resolve_model()'s device/model string above, and was
+# never captured anywhere in the codebase -- confirmed by grep before
+# writing this (see punch list item, originally scoped as "NSDP/ESCP"
+# which turned out to already be built in smart_switch_pipeline.py for
+# smart-switch classification specifically; this is the genuinely open
+# piece, generalized to ANY device, not just switches).
+#
+# Explicit manufacturer TXT keys, checked first -- a device stating its
+# own manufacturer directly (e.g. an IPP printer's usb_MFG) is stronger
+# evidence than inferring one from the service type it happens to
+# answer on.
+VENDOR_TXT_KEYS = ["usb_MFG", "manufacturer"]
+
+# service_type -> vendor name, checked only when no explicit TXT-key
+# signal above matched. Deliberately does NOT include _airplay._tcp
+# even though it also carries a 'model' key -- AirPlay is an open
+# protocol any vendor can implement (see MODEL_TXT_KEYS' own note:
+# confirmed live on a Marantz AV receiver, not Apple hardware). Only
+# service types genuinely exclusive to one company are safe to use as
+# a vendor signal on their own.
+SERVICE_TYPE_VENDOR = {
+    "_googlecast._tcp.local.": "Google",
+    "_device-info._tcp.local.": "Apple",
+    "_companion-link._tcp.local.": "Apple",
+    "_amzn-wplay._tcp.local.": "Amazon",
+}
+
+
+def _resolve_vendor(service_type: str, properties: dict) -> str | None:
+    """Returns a self-reported vendor name, or None if neither an
+    explicit TXT key nor the service type gives safe evidence of one."""
+    if properties:
+        for key in VENDOR_TXT_KEYS:
+            if properties.get(key):
+                return properties[key]
+    return SERVICE_TYPE_VENDOR.get(service_type)
+
+
+_SSDP_XML_TIMEOUT = 2.0
+
+
+def _fetch_ssdp_device_descriptor(location_url: str) -> dict:
+    """
+    VENDOR-XFEED-1: follows a device's own SSDP LOCATION URL and parses
+    its UPnP device-descriptor XML for <manufacturer>/<modelName> --
+    fields every UPnP-compliant device MUST publish there, unlike the
+    SERVER header (which varies wildly by vendor, see MDNS-4, and is
+    often absent or too generic to use). This is a genuinely new signal:
+    neither this module's existing SSDP handling nor
+    smart_switch_pipeline.py's ever follows LOCATION today, both only
+    read the SERVER header. One extra same-LAN HTTP GET per newly-seen
+    SSDP device -- same trust level as the M-SEARCH probe that found it,
+    not a new class of network action.
+
+    Tag lookup deliberately ignores XML namespace prefixes (matches by
+    bare tag name via rsplit) rather than requiring an exact namespace
+    match -- real-world UPnP descriptor XML is inconsistent enough about
+    declaring/using the standard urn:schemas-upnp-org:device-1-0
+    namespace that a strict match risks missing well-formed documents.
+    """
+    try:
+        req = urllib.request.Request(location_url, headers={"User-Agent": "NetLanvas/1.0"})
+        with urllib.request.urlopen(req, timeout=_SSDP_XML_TIMEOUT) as resp:
+            body = resp.read(65536)
+        root = ET.fromstring(body)
+        manufacturer, model_name = None, None
+        for el in root.iter():
+            tag = el.tag.rsplit("}", 1)[-1]
+            if tag == "manufacturer" and not manufacturer and el.text:
+                manufacturer = el.text.strip()
+            elif tag == "modelName" and not model_name and el.text:
+                model_name = el.text.strip()
+            if manufacturer and model_name:
+                break
+        return {"manufacturer": manufacturer, "model_name": model_name}
+    except Exception:
+        return {}
+
+
+async def _fetch_ssdp_descriptors_bounded(locations: dict) -> dict:
+    """locations: {ip: location_url}. Bounded concurrency + short
+    per-request timeout (see _SSDP_XML_TIMEOUT) so a slow/unreachable
+    device's descriptor URL can't stall the whole fast-tick sweep."""
+    if not locations:
+        return {}
+    semaphore = asyncio.Semaphore(10)
+    loop = asyncio.get_running_loop()
+
+    async def fetch(ip, url):
+        async with semaphore:
+            return ip, await loop.run_in_executor(None, _fetch_ssdp_device_descriptor, url)
+
+    results = await asyncio.gather(*(fetch(ip, url) for ip, url in locations.items()), return_exceptions=True)
+    return {ip: data for r in results if not isinstance(r, Exception) for ip, data in [r] if data}
 
 
 def _normalize_properties(raw_properties) -> dict:
@@ -229,11 +328,18 @@ def _ssdp_sweep_blocking():
             try:
                 data, addr = sock.recvfrom(1024)
                 ip = addr[0]
-                headers = data.decode('utf-8', errors='ignore').split('\r\n')
-                for header in headers:
-                    if header.upper().startswith("SERVER:"):
-                        server_string = header.split(":", 1)[1].strip()
-                        discovered[ip] = server_string
+                headers = {}
+                for header in data.decode('utf-8', errors='ignore').split('\r\n'):
+                    if ":" not in header:
+                        continue
+                    key, _, value = header.partition(":")
+                    headers[key.strip().upper()] = value.strip()
+                if "SERVER" in headers:
+                    # VENDOR-XFEED-1: LOCATION wasn't previously kept here
+                    # at all (only the SERVER header) -- now captured
+                    # alongside it so run_os_fingerprinter() can follow it
+                    # for the device's own manufacturer/modelName.
+                    discovered[ip] = {"server": headers["SERVER"], "location": headers.get("LOCATION")}
             except socket.timeout:
                 break
     except Exception:
@@ -246,19 +352,28 @@ async def run_ssdp_sweep():
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _ssdp_sweep_blocking)
 
+# VENDOR-XFEED-1: same fallback gate fingerprinter.py's ENT-1 already
+# uses for sysObjectID-derived vendor -- never override a real OUI
+# match, only fill in where OUI lookup structurally couldn't help
+# (randomized MAC) or had no data (unmatched/reserved block). Shared
+# constant, not a local duplicate -- see oui_manager.VENDOR_PLACEHOLDER_
+# VALUES' own comment for why that matters.
+_VENDOR_FALLBACK_ELIGIBLE = VENDOR_PLACEHOLDER_VALUES
+
+
 async def run_os_fingerprinter():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT b.ip_address, n.id, n.hostname
+        SELECT b.ip_address, b.mac_address, n.id, n.hostname, i.vendor
         FROM l3_bindings b
         JOIN l2_interfaces i ON b.mac_address = i.mac_address
         JOIN logical_nodes n ON i.node_id = n.id
         WHERE b.ip_address IS NOT NULL
     ''')
-    targets = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
-    
+    targets = {row[0]: (row[1], row[2], row[3], row[4]) for row in cursor.fetchall()}
+
     if not targets:
         conn.close()
         return
@@ -270,22 +385,45 @@ async def run_os_fingerprinter():
         run_ssdp_sweep()
     )
 
+    # VENDOR-XFEED-1: only follow LOCATION for devices this sweep is
+    # actually going to use (a known target, and eligible for a vendor
+    # fallback in the first place) -- not every SSDP replier on the
+    # segment, most of which aren't tracked nodes or already have a
+    # real OUI vendor and gain nothing from the extra HTTP round-trip.
+    ssdp_locations = {
+        ip: entry["location"]
+        for ip, entry in ssdp_results.items()
+        if entry.get("location") and ip in targets and targets[ip][3] in _VENDOR_FALLBACK_ELIGIBLE
+    }
+    ssdp_descriptors = await _fetch_ssdp_descriptors_bounded(ssdp_locations)
+
     os_updates = []
+    vendor_updates = []
     hostname_writes = 0
 
-    for ip, (node_id, current_hostname) in targets.items():
+    for ip, (mac, node_id, current_hostname, current_vendor) in targets.items():
         mdns_hostname = None
         new_os = None
+        vendor_candidate = None
 
         if ip in mdns_results:
             entry = mdns_results[ip]
             props = entry.get("properties")
+            service_type = entry.get("service_type")
             friendly_name = _resolve_friendly_name(props)
             mdns_hostname = friendly_name if friendly_name else entry["instance_name"]
             resolved_model = _resolve_model(props)
             new_os = resolved_model if resolved_model else "mDNS Node"
+            vendor_candidate = _resolve_vendor(service_type, props)
         elif ip in ssdp_results:
-            new_os = _parse_ssdp_server_header(ssdp_results[ip])
+            new_os = _parse_ssdp_server_header(ssdp_results[ip]["server"])
+
+        # SSDP's own device descriptor (manufacturer, a required UPnP
+        # field) is stronger evidence than an mDNS service-type inference
+        # -- prefer it when both happened to be available for the same IP.
+        descriptor = ssdp_descriptors.get(ip)
+        if descriptor and descriptor.get("manufacturer"):
+            vendor_candidate = descriptor["manufacturer"]
 
         # HOSTNAME-1: this used to write hostname directly and
         # unconditionally (new_hostname != current_hostname was the
@@ -301,6 +439,9 @@ async def run_os_fingerprinter():
         if new_os:
             os_updates.append((new_os, node_id))
 
+        if vendor_candidate and current_vendor in _VENDOR_FALLBACK_ELIGIBLE:
+            vendor_updates.append((vendor_candidate, mac))
+
     if os_updates:
         cursor.executemany('''
             UPDATE logical_nodes
@@ -308,9 +449,26 @@ async def run_os_fingerprinter():
             WHERE id = ?
         ''', os_updates)
 
+    if vendor_updates:
+        # Re-checks the eligibility gate in the WHERE clause too (not
+        # just in the Python loop above) -- defends against vendor
+        # having changed underneath this pass between the SELECT at the
+        # top of this function and this UPDATE, same defensive style as
+        # the rest of this codebase's write paths. Parameterized rather
+        # than string-formatted into the IN clause, even though
+        # _VENDOR_FALLBACK_ELIGIBLE is a fixed constant, not user input.
+        cursor.executemany('''
+            UPDATE l2_interfaces
+            SET vendor = ?
+            WHERE mac_address = ? AND vendor IN (?, ?)
+        ''', [(vendor, mac, *_VENDOR_FALLBACK_ELIGIBLE) for vendor, mac in vendor_updates])
+
     conn.commit()
     conn.close()
-    logger.info(f"[*] OS Profiler: Dynamically mapped {len(os_updates)} IoT/Media endpoints via broadcast protocols ({hostname_writes} hostname updates).")
+    logger.info(
+        f"[*] OS Profiler: Dynamically mapped {len(os_updates)} IoT/Media endpoints via broadcast protocols "
+        f"({hostname_writes} hostname updates, {len(vendor_updates)} OUI-fallback vendor cross-feeds)."
+    )
 
 if __name__ == "__main__":
     asyncio.run(run_os_fingerprinter())

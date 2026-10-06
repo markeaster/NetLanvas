@@ -105,32 +105,42 @@ if NETLANVAS_MODE == "native":
 else:
     REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
     REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-    # The Redis password is generated once per install (redis_secrets_init
-    # in docker-compose.yaml, the same generate-once-persist-to-a-file
-    # pattern already used for the TLS cert and device identity key) and
-    # written to the same ./config host mount this process already has
-    # mounted, rather than a fixed literal shared across every install.
-    #
-    # Some deployments of this same code path never run a real Redis
-    # service at all (a minimal API-only build with no queue behind it,
-    # for instance) and never write this file. Redis absence there is
-    # meant to be tolerated gracefully at the point of an actual get/set
-    # call -- never at import time -- so a missing file falls back to a
-    # random, never-persisted, this-process-only password instead of
-    # crashing the process outright. Authentication to a real Redis will
-    # still correctly fail (there's nothing on either side to match), but
-    # a deployment with no Redis at all can still start.
+    # REDISAUTH-1 (2026-09-21): was a hardcoded literal
+    # ("SuperSecretRedisPassword123!") identical across every install --
+    # generated once per install now instead (redis_secrets_init in
+    # docker-compose.yaml, same generate-once-persist-to-a-file pattern
+    # already used for the TLS cert and device identity key), written
+    # to the same ./config host mount this process already has mounted.
+    # Fails loudly and immediately if the file is somehow missing --
+    # a silent empty-password fallback would just surface later as a
+    # much more confusing Redis auth failure instead.
     try:
         with open("/app/config/redis.key") as _f:
             REDIS_PASSWORD = _f.read().strip()
     except FileNotFoundError:
+        # REDISAUTH-2 (2026-09-21): found live -- some deployments of
+        # this same non-native code path (the demo site's own minimal
+        # single-container compose file, in particular) never run a
+        # real Redis service or redis_secrets_init at all, and never
+        # did even before REDISAUTH-1. Redis absence there was always
+        # tolerated -- gracefully, at the point of an actual get/set
+        # call, per the existing fallback behavior documented in
+        # docker-compose.yaml's own redis service comment ("No host
+        # address published yet") -- never at import time. Making the
+        # password read a hard, eager crash-on-missing-file broke
+        # exactly that: this process couldn't even start. Falls back
+        # to a random, never-persisted, this-process-only value --
+        # authentication to a real Redis will still correctly fail
+        # (there's nothing to match it), but the process itself no
+        # longer dies over a file that was never expected to exist
+        # here in the first place.
         import secrets as _secrets
         REDIS_PASSWORD = _secrets.token_hex(32)
         logging.getLogger("Netlanvas").warning(
             "[!] /app/config/redis.key not found -- generating an ephemeral, "
             "process-local Redis password instead. Expected on deployments "
-            "with no real Redis service; if this appliance DOES have one, "
-            "something is wrong with the mount."
+            "with no real Redis service (e.g. the read-only demo); if this "
+            "appliance DOES have one, something is wrong with the mount."
         )
     redis_client = aioredis.from_url(f"redis://{REDIS_HOST}:{REDIS_PORT}", password=REDIS_PASSWORD, decode_responses=True, socket_timeout=2.0)
 
@@ -711,6 +721,55 @@ async def stage_publish_network_interfaces():
     except Exception as e:
         logger.debug(f"Failed to publish host network interfaces to Redis: {e}")
 
+def _repoint_infrastructure_links_before_purge(cursor, retiring_ips):
+    """
+    TOPO-2 (2026-09-25, reported live): infrastructure_links (LLDP
+    topology edges, §4/§2.3) stores its two endpoints as raw IP
+    strings (local_switch_ip, remote_system_name) with no MAC column
+    at all -- the /api/topology edge query resolves each one to a
+    node_id by JOINing against l3_bindings.ip_address live, at read
+    time, not at LLDP-crawl-write time. The moment an l3_bindings row
+    for one of those IPs is purged (either ARP-2's immediate
+    retirement just above, or this function's own age-based fallback
+    right below), that JOIN silently returns nothing and the edge
+    vanishes from the Graph UI -- confirmed live: an Access Point
+    whose ARP-2-retired old IP was still the one an infrastructure_
+    links row pointed at rendered as a fully floating,
+    disconnected node the moment that row was retired, despite the
+    device itself being completely fine and still on the network at
+    its real IP. This has always been possible via the pre-existing
+    3-hour age-based purge below too -- ARP-2 just collapsed the
+    window from hours to minutes, which is what made it actually
+    surface today.
+
+    Called with the exact set of IPs a caller is about to delete from
+    l3_bindings, BEFORE the delete runs: for each one, looks up its
+    MAC (still present pre-delete) and repoints any
+    infrastructure_links row referencing that IP to whatever OTHER
+    current l3_bindings IP the same MAC already has, if any -- the
+    device's live topology position is unaffected by which specific
+    IP happened to win last_seen. Leaves the row alone (and lets the
+    edge legitimately drop) when the MAC truly has no other current
+    IP, since there's nothing real to repoint to.
+    """
+    if not retiring_ips:
+        return
+    placeholders = ", ".join("?" for _ in retiring_ips)
+    retiring = cursor.execute(
+        f"SELECT ip_address, mac_address FROM l3_bindings WHERE ip_address IN ({placeholders})",
+        list(retiring_ips)
+    ).fetchall()
+    for old_ip, mac in retiring:
+        replacement = cursor.execute(
+            "SELECT ip_address FROM l3_bindings WHERE mac_address = ? AND ip_address != ? ORDER BY last_seen DESC LIMIT 1",
+            (mac, old_ip)
+        ).fetchone()
+        if not replacement:
+            continue
+        new_ip = replacement[0]
+        cursor.execute("UPDATE infrastructure_links SET remote_system_name = ? WHERE remote_system_name = ?", (new_ip, old_ip))
+        cursor.execute("UPDATE infrastructure_links SET local_switch_ip = ? WHERE local_switch_ip = ?", (new_ip, old_ip))
+
 async def stage_arp_scrape(is_deep_scan_tick=False):
     # POLL-1: one representative IP per node instead of every IP that
     # node happens to have -- ARP cache content is identical regardless
@@ -835,6 +894,67 @@ async def stage_arp_scrape(is_deep_scan_tick=False):
             ''', (ip, mac))
             upsert_count += 1
 
+        # ARP-2 (2026-09-25, reported live): a router can mark an ARP
+        # entry invalid/failed via ipNetToMediaType (step_35_arp's
+        # stale_entries/global_stale_ips) while STILL listing it in the
+        # walk -- confirmed directly against a real router: status
+        # "failed", entry still present, not yet aged out of its table.
+        # ARP-1 below discarded global_stale_ips entirely because a
+        # device that goes fully offline usually just vanishes from the
+        # walk rather than lingering marked invalid -- true, but not the
+        # only case: a MAC that's still alive on ANOTHER IP (a DHCP
+        # renewal, a static-to-dynamic move) can leave its old IP's
+        # entry sitting in "failed" state for a while first. Left alone,
+        # that old row competes with the real one on
+        # last_seen -- server.py's _collapse_stale_same_subnet_bindings()
+        # picks whichever was polled more recently to decide which IP to
+        # show for a device, which is pure SNMP walk timing, not
+        # correctness, and can pick the dead one. Retiring an IP the
+        # instant the router itself flags it invalid (rather than
+        # waiting up to ARP_CACHE_PURGE_AGE_SECONDS below) closes that
+        # gap without reintroducing ARP-1's regression: this only fires
+        # for an entry the walk actually saw and flagged, never for one
+        # that silently disappears, which the age-based purge below
+        # still exists to catch. Excludes any IP this same cycle also
+        # confirmed valid (elsewhere in global_arp_data) -- belt and
+        # braces against the cross-target union in global_stale_ips ever
+        # outvoting a genuinely fresh confirmation.
+        #
+        # Real bug caught live on first deploy: global_stale_ips is
+        # collected from the SAME raw ipNetToMediaType walk as
+        # global_arp_data, but unlike global_arp_data it was never run
+        # through the known_subnets filter above -- a router's ARP
+        # table routinely carries thousands of invalid/failed entries
+        # for address space this appliance was never going to touch
+        # anyway (Docker bridges, VPN scan noise, etc, exactly what
+        # NET-2's comment already describes for the valid side). Left
+        # unfiltered, this issued ~2000 DELETE attempts a cycle --
+        # almost all no-ops against ip_addresses that were never real
+        # l3_bindings rows, since nothing outside known_subnets is ever
+        # written in the first place, but wasteful and one schema
+        # change away from not being a no-op. Same filter, same reason.
+        immediately_stale_ips = set()
+        if known_subnets:
+            for ip in global_stale_ips:
+                try:
+                    addr = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if any(addr in net for net in known_subnets):
+                    immediately_stale_ips.add(ip)
+        immediately_stale_ips -= set(global_arp_data.values())
+        if immediately_stale_ips:
+            _repoint_infrastructure_links_before_purge(cursor, immediately_stale_ips)
+            arp2_deleted = 0
+            for ip in immediately_stale_ips:
+                cursor.execute(
+                    "DELETE FROM l3_bindings WHERE discovery_source = 'ROUTER_ARP_CACHE' AND ip_address = ?",
+                    (ip,)
+                )
+                arp2_deleted += cursor.rowcount
+            if arp2_deleted:
+                logger.info(f"[ARP-2] Retired {arp2_deleted} l3_bindings row(s) the source router just flagged invalid/failed (ipNetToMediaType).")
+
         # NET-3 follow-up, ARP-1 (2026-09-20): retire immediately rather
         # than waiting for some other event to trigger cleanup (e.g. the
         # same MAC reappearing at a new IP elsewhere) -- a device that
@@ -871,6 +991,13 @@ async def stage_arp_scrape(is_deep_scan_tick=False):
         # device_state_tracker.py) so a real network blip or a brief
         # router reboot can't cause a false purge.
         ARP_CACHE_PURGE_AGE_SECONDS = 3 * 60 * 60
+        aging_out = cursor.execute(
+            "SELECT ip_address FROM l3_bindings "
+            "WHERE discovery_source = 'ROUTER_ARP_CACHE' "
+            "AND last_seen <= datetime('now', ?)",
+            (f"-{ARP_CACHE_PURGE_AGE_SECONDS} seconds",)
+        ).fetchall()
+        _repoint_infrastructure_links_before_purge(cursor, [row[0] for row in aging_out])
         cursor.execute(
             "DELETE FROM l3_bindings "
             "WHERE discovery_source = 'ROUTER_ARP_CACHE' "
@@ -1080,6 +1207,15 @@ async def stage_inventory_snapshot_sync():
     synced = await asyncio.to_thread(run_inventory_snapshot_sync)
     if synced:
         logger.info(f"Inventory snapshot sync complete. Devices synced: {synced}")
+        # GAP-9 (design doc Sections 6/12): this process (netlanvas_core)
+        # has no ./tls mount and can't sign the assertion a real sync
+        # push needs -- same reason register_entitlement_status() lives
+        # in netlanvas_api, not here (see that function's own comment).
+        # So this only marks a flag in the config.db both containers
+        # share; netlanvas_api's own background loop (server.py's
+        # _sync_pending_push_loop) notices it and does the actual
+        # fire-and-forget push from where it's actually able to.
+        config._set_setting("SYNC_PENDING_PUSH", "true")
 
 _alert_dispatch_task = None
 
@@ -1491,8 +1627,8 @@ def _install_windows_proactor_exception_filter() -> None:
 
     Rate-limited to one log line per NOISE_LOG_INTERVAL_SECONDS (with a
     count of how many were swallowed in between) rather than one line
-    per occurrence -- confirmed live (2026-09-02, real Windows install)
-    that with a dashboard tab genuinely open, ordinary browser
+    per occurrence -- confirmed live (2026-09-02, real v3.8.4 install on
+    a Windows test machine) that with a dashboard tab genuinely open, ordinary browser
     keep-alive cycling triggers this pattern in bursts of 2-4 every
     10-15s, continuously, for as long as the tab stays open. The
     original per-occurrence version already fixed the scary part (a raw
@@ -1543,9 +1679,9 @@ def _sync_windows_firewall_rule(enabled: bool, port: int) -> None:
     own -- Windows Defender Firewall has no inbound allow rule for this
     app by default, so a LAN client's connection is silently dropped
     even though `netstat` shows the app correctly LISTENING on all
-    interfaces (confirmed live: exactly this symptom on a real Windows
-    box before this was added -- app up, port bound, still unreachable
-    from another machine).
+    interfaces (confirmed live: exactly this symptom on a Windows test machine before
+    this was added -- app up, port bound, still unreachable from
+    another machine).
 
     The installer (packaging/windows/netlanvas.iss) pre-creates this
     same-named rule at install time, disabled (enable=no) -- visible/
@@ -1614,7 +1750,7 @@ async def main():
         # Application Event Log (source "NetLanvas", written by WinSW
         # directly -- far more reliable than piecing this together from
         # the app's own text log) shows every single RESTART-triggered
-        # exit on a real Windows test box -- five for five, including one with a
+        # exit on a Windows test machine -- five for five, including one with a
         # nonzero exit code -- logged only as "Child process finished
         # with N" and NEVER followed by an automatic restart. Windows'
         # System event log confirms SCM never even saw these as

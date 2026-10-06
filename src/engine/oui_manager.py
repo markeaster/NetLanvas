@@ -189,6 +189,18 @@ def parse_and_import_extended_oui(file_path, source="MA-M"):
 # lookup that actually knows the real vendor.
 _RESERVED_FOR_SUBDIVISION = "IEEE Registration Authority"
 
+# VENDOR-XFEED-1 follow-up (2026-09-24): shared here, not defined
+# separately in each caller, so fingerprinter.py's anti-clobber check
+# and os_fingerprinter.py's mDNS/SSDP fallback gate can never drift out
+# of sync with what get_vendor_info() below actually returns as a
+# placeholder. Found live: without this shared, single source of truth,
+# fingerprinter.py's own deep-scan pass was unconditionally overwriting
+# a real mDNS/SSDP-sourced vendor with a fresh "Unknown Hardware" OUI
+# miss on every cycle, silently undoing VENDOR-XFEED-1 a few ticks after
+# it ran.
+VENDOR_PLACEHOLDER_VALUES = ("Unknown Hardware", "Private (Randomized MAC)")
+
+
 def is_locally_administered(mac_address):
     """
     OUI-2 (2026-09-06): the locally-administered bit (bit 1 of the

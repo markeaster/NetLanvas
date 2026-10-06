@@ -21,7 +21,7 @@
 ; Settings toggle changes (main.py's _sync_windows_firewall_rule()).
 
 #define MyAppName "NetLanvas"
-#define MyAppVersion "3.20.0"
+#define MyAppVersion "3.30.0"
 #define MyAppPublisher "NetLanvas"
 #define MyAppURL "https://netlanvas.com"
 #define MyDataDir "C:\ProgramData\NetLanvas"
@@ -82,7 +82,7 @@ Source: "build\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesub
 ; uninstall NetLanvas short of knowing to open Windows Settings > Apps
 ; (unins000.exe in {app} works, but nothing pointed a user at it, or at
 ; this directory, at all). Confirmed live as real user-reported
-; friction (2026-09-02, v3.8.4 first-run feedback on Marks-PC): "we
+; friction (2026-09-02, v3.8.4 first-run feedback on a Windows test machine): "we
 ; need an uninstaller." Inno Setup's own uninstall entry in Apps &
 ; Features already existed the whole time (UninstallDisplayIcon above
 ; proves the metadata was always there) -- this is purely about making
@@ -112,7 +112,7 @@ Filename: "{app}\netlanvas-service.exe"; Parameters: "start"; Flags: runhidden w
 ; button all repainting together) stalled mid-way through, and
 ; whatever was on screen from the PREVIOUS page kept showing until the
 ; wait ended. Confirmed live as real user feedback (2026-09-02, v3.8.5
-; first-run on Marks-PC): "the finish button appears before the
+; first-run on a Windows test machine): "the finish button appears before the
 ; 'completing the NetLanvas setup...' text" -- disabling the button
 ; (the previous attempt at this fix) didn't help, because a disabled
 ; control's changed appearance doesn't repaint during a Sleep() either.
@@ -138,7 +138,7 @@ Filename: "{sys}\cmd.exe"; Parameters: "/c ping -n 8 127.0.0.1 >NUL"; Flags: run
 ; between) re-runs this whole [Run] section every time, and `netsh
 ; add rule` has no upsert semantics -- it unconditionally creates a
 ; NEW rule even when one of the same name already exists. Confirmed
-; live on Marks-PC: 3 real duplicate "NetLanvas Remote Web Viewing"
+; live on a Windows test machine: 3 real duplicate "NetLanvas Remote Web Viewing"
 ; rules after 3 in-place upgrades, 2 stuck enabled=true even after the
 ; Settings toggle was switched off -- `netsh set rule` does not
 ; reliably flip every same-named duplicate, so a stale enabled
@@ -162,7 +162,7 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""N
 ; notice a checkbox needs leaving checked) is left on a plain "Setup
 ; is complete" screen with no indication anything else is required.
 ; Confirmed live as real user feedback (2026-09-02, v3.8.4 first-run on
-; Marks-PC): "the optional open browser to continue is not optional,
+; a Windows test machine): "the optional open browser to continue is not optional,
 ; so we shouldn't give a tick box." Dropping "postinstall" removes the
 ; checkbox entirely -- this now just always runs as a normal [Run]
 ; step (skipifsilent still skips it for unattended installs, where
@@ -188,12 +188,18 @@ Filename: "{app}\netlanvas-service.exe"; Parameters: "uninstall"; Flags: runhidd
 ; running to legitimately use it) with no upside kept.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""NetLanvas Remote Web Viewing"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveNetLanvasFirewallRule"
 
-; ProgramData (the network database, TLS/identity material, and logs)
-; is deliberately left in place on uninstall -- same convention as
-; every other Windows app that separates "the program" from "what it
-; produced": uninstalling NetLanvas shouldn't silently destroy a
-; user's collected network history. A future "remove all data too"
-; checkbox is a reasonable enhancement, not done here.
+; ProgramData (the network database, TLS/identity material, and logs) is
+; left in place by DEFAULT on uninstall -- same convention as every
+; other Windows app that separates "the program" from "what it
+; produced": uninstalling NetLanvas shouldn't silently destroy a user's
+; collected network history. InitializeUninstall/UninstallStepChanged
+; below (2026-09-24, punch list item) add the "remove all data too"
+; option this comment used to describe as not-yet-done: asked as a
+; separate Yes/No question at uninstall time, defaulting to No (see
+; MB_DEFBUTTON2 below) precisely because the failure mode of
+; accidentally KEEPING data nobody wanted is trivially recoverable
+; (uninstall again, tick yes) while accidentally DELETING a user's
+; whole device inventory/TLS identity is not.
 
 [Code]
 // NATIVE-17 (2026-09-04): stops any already-running NetLanvas service
@@ -247,7 +253,7 @@ end;
 // fingerprint + one-time setup token + setup URL) directly on the
 // Finished page, and explains the certificate warning the user is
 // about to see in their browser -- confirmed live as real user
-// feedback (2026-09-02, v3.8.4 first-run on Marks-PC): "Add a note
+// feedback (2026-09-02, v3.8.4 first-run on a Windows test machine): "Add a note
 // that they should click advanced, proceed etc, and maybe display
 // the certificate hash." The service (started by [Run] above) writes
 // this exact card to welcome.txt within a few seconds of boot -- see
@@ -270,7 +276,7 @@ begin
   // wizard's message pump entirely, so the Finished page's own
   // transition (title, body, button) stalled mid-repaint until the
   // wait ended -- confirmed live as real user feedback (2026-09-02,
-  // v3.8.5 first-run on Marks-PC): "the finish button appears before
+  // v3.8.5 first-run on a Windows test machine): "the finish button appears before
   // the 'completing the NetLanvas setup...' text." The actual wait now
   // happens earlier, as a [Run] step on the installing/progress page
   // (see netlanvas.iss's own comment there) -- by the time
@@ -324,6 +330,83 @@ begin
       WizardForm.FinishedLabel.Caption :=
         WizardForm.FinishedLabel.Caption + #13#10 + #13#10 +
         'Setup is almost done. Your browser will now open automatically to finish it. It will show a certificate warning first -- NetLanvas uses a private certificate it generates for this device, so this is expected. Click "Advanced", then "Proceed" (wording varies by browser) to continue; the setup token is already filled in on the page that follows.';
+    end;
+  end;
+end;
+
+// "Remove all data too" (2026-09-24, punch list item): a separate
+// question from "uninstall NetLanvas", asked once, up front -- not a
+// wizard page of its own (uninstall has no wizard the way install
+// does; a plain MsgBox is the standard Inno Setup pattern here) and
+// not silently bundled into the uninstall Inno already asks the user
+// to confirm, since "remove the program" and "also destroy everything
+// it collected" are two different decisions with two very different
+// blast radii. Result is always True -- a No answer here means "don't
+// delete data", never "cancel the uninstall itself".
+var
+  g_DeleteAllData: Boolean;
+
+function InitializeUninstall(): Boolean;
+begin
+  // MB_DEFBUTTON2 makes "No" the default (Enter-key/pre-focused)
+  // choice -- see this file's own [UninstallRun] comment above for why
+  // that direction of mistake is the safe one to default toward.
+  g_DeleteAllData := (MsgBox(
+    'Also delete all NetLanvas data?' + #13#10 + #13#10 +
+    'This permanently removes your device inventory, discovered network history, TLS/identity keys, and logs (' + ExpandConstant('{#MyDataDir}') + '). This cannot be undone.' + #13#10 + #13#10 +
+    'Choose No to keep this data -- for example, if you plan to reinstall NetLanvas later and pick up where you left off.',
+    mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES);
+
+  // Design doc Section 9 (2026-09-25): informational only, no new
+  // network call from this script -- an unattended uninstaller has no
+  // logged-in session to reuse the existing (session-gated) De-register
+  // button's own signed-assertion call with, and a new *unauthenticated*
+  // local endpoint just to make this automatic isn't a decision to make
+  // inside an installer script. If this appliance is registered to an
+  // account, its device slot auto-frees after 30 days of inactivity
+  // either way -- this just offers the faster, already-existing path.
+  MsgBox(
+    'If this appliance is registered to a NetLanvas account (Multi-Site / Appliance Inventory Cloud Sync or a paid plan), its device slot stays reserved on your account for up to 30 days of inactivity before it''s freed automatically.' + #13#10 + #13#10 +
+    'To free it immediately instead, open this appliance''s Settings page first and click De-register This Device before continuing this uninstall.',
+    mbInformation, MB_OK);
+
+  Result := True;
+end;
+
+procedure UninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Attempt: Integer;
+begin
+  // usPostUninstall: after Inno's own automatic removal of the files
+  // *it* installed (tracked in the uninstall log) has already
+  // completed -- ProgramData was never part of that log (see [Dirs]
+  // above: created there, but nothing under it is an [Files] entry),
+  // so this is the only step that ever touches it, and only when the
+  // user explicitly opted in above.
+  //
+  // Found live (2026-09-24): a single DelTree call left empty
+  // directory shells behind (every file gone, but {#MyDataDir}\data
+  // and \logs themselves survived) -- confirmed by hand immediately
+  // after that a plain rmdir succeeded instantly with no error, so
+  // this is a transient sharing violation on the just-emptied
+  // directory handle (antivirus/indexing briefly scanning it is the
+  // usual cause on Windows), not a real lock or a wrong path/flags --
+  // the same general "Windows doesn't let go instantly" class of
+  // problem NATIVE-17's stop-netlanvas.ps1 already had to work around
+  // for the service process itself. DelTree returns False rather than
+  // raising on a partial failure, so retrying a few times with a short
+  // pause (instead of accepting a silent partial failure the user
+  // would have to notice and clean up by hand) is both safe and
+  // idempotent -- a retry just continues removing whatever's left.
+  if (CurUninstallStep = usPostUninstall) and g_DeleteAllData then
+  begin
+    Attempt := 1;
+    while (Attempt <= 5) and DirExists(ExpandConstant('{#MyDataDir}')) do
+    begin
+      DelTree(ExpandConstant('{#MyDataDir}'), True, True, True);
+      if DirExists(ExpandConstant('{#MyDataDir}')) then
+        Sleep(1000);
+      Attempt := Attempt + 1;
     end;
   end;
 end;

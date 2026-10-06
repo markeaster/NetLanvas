@@ -4,7 +4,7 @@ import sqlite3
 import re
 import os
 import ipaddress
-from engine.oui_manager import get_vendor_info, get_vendor_from_sysobjectid
+from engine.oui_manager import get_vendor_info, get_vendor_from_sysobjectid, VENDOR_PLACEHOLDER_VALUES
 from engine.auto_discovery import detect_default_gateway
 from engine.snmp_adapter import adaptive_snmp_query, clean_snmp_string
 from engine.hostname_registry import set_hostname_by_mac, is_usable_hostname, PRIORITY_SNMP_SYSNAME
@@ -246,7 +246,33 @@ def update_device_fingerprint(mac, sys_descr=None, sys_name=None, device_type=No
             SET device_type = ?, weld_confidence = ?
             WHERE id = ?
         ''', (final_type, final_conf, target_node_id))
-        cursor.execute('UPDATE l2_interfaces SET vendor = ?, category = ?, market_segment = ? WHERE mac_address = ?', (vendor, category, market_segment, mac))
+
+        # VENDOR-XFEED-1 follow-up (2026-09-24): found live -- this used
+        # to overwrite vendor unconditionally on every call, including
+        # every deep-scan re-fingerprint of an SNMP-silent device, whose
+        # freshly recomputed `vendor` here is just get_vendor_info()'s
+        # bare OUI-only result (a placeholder, for exactly the devices
+        # this fallback matters for). That's correct in isolation, but
+        # it doesn't know about a BETTER vendor os_fingerprinter.py's
+        # mDNS/SSDP fallback (or this same function's own ENT-1
+        # sysObjectID fallback below) may have already written for this
+        # MAC. Confirmed live: every mDNS/SSDP-sourced vendor cross-feed
+        # from one fast tick was silently wiped back to a placeholder by
+        # the very next deep-scan tick. Same anti-clobber principle as
+        # the device_type/weld_confidence protection above, applied to
+        # vendor: an incoming placeholder value never replaces an
+        # already-known real one -- but a real value (including a
+        # better OUI match found since, e.g. after an OUI DB refresh)
+        # still always wins, over either a placeholder OR another real
+        # value, same as before this fix.
+        final_vendor = vendor
+        if vendor in VENDOR_PLACEHOLDER_VALUES:
+            cursor.execute('SELECT vendor FROM l2_interfaces WHERE mac_address = ?', (mac,))
+            existing_vendor_row = cursor.fetchone()
+            existing_vendor = existing_vendor_row[0] if existing_vendor_row else None
+            if existing_vendor and existing_vendor not in VENDOR_PLACEHOLDER_VALUES:
+                final_vendor = existing_vendor
+        cursor.execute('UPDATE l2_interfaces SET vendor = ?, category = ?, market_segment = ? WHERE mac_address = ?', (final_vendor, category, market_segment, mac))
     else:
         cursor.execute('INSERT INTO logical_nodes (hostname, device_type, weld_confidence) VALUES (?, ?, ?)', (display_name, device_type, confidence))
         target_node_id = cursor.lastrowid
@@ -473,8 +499,8 @@ async def run_fingerprinter():
     # searching" (the alternative considered first) -- that assumption
     # doesn't hold in general (multiple independent routers/VRRP pairs
     # are real topologies), where a wider semaphore has no such
-    # correctness risk, just a resource-headroom one. A Raspberry Pi
-    # appliance is genuinely memory-constrained (990MB total, already using swap at
+    # correctness risk, just a resource-headroom one. A lab Raspberry Pi is
+    # genuinely memory-constrained (990MB total, already using swap at
     # the time this was raised) -- confirmed net-snmp CLI subprocesses
     # are small and short-lived enough that Semaphore(25)'s own
     # ~30-90MB estimate scaled to 100 stays well within that budget,

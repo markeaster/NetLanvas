@@ -11,7 +11,8 @@ the full threat-model reasoning.
 Invoked by main.py's automatic triggers (S11: tick-10 first send, the
 daily periodic send) and by the Preview page's "Submit Now" button (S7)
 -- all three call submit() directly, so there is exactly one submission
-code path to keep correct.
+code path to keep correct. Each passes its own trigger_source (see
+submit()) purely so logs can tell the three apart.
 """
 
 import base64
@@ -99,13 +100,23 @@ def _save_classifications_if_present(resp_json: dict) -> None:
         logger.warning(f"[*] Telemetry: failed to cache premium classifications from ack: {e}")
 
 
-def submit(instance_id: str, payload: dict, timeout: float = 15.0) -> bool:
+def submit(instance_id: str, payload: dict, timeout: float = 15.0, trigger_source: str = "automatic") -> bool:
     """
     Full handshake + submit for one payload. Returns True on success,
     False on any failure (logged, never raised -- a telemetry
     submission failing must never affect the appliance's own
     operation, same principle as send_first_boot_telemetry/
     maybe_send_telemetry_heartbeat in main.py).
+
+    trigger_source (2026-09-24, punch list item): purely local/log-side
+    -- identifies WHICH of this module's three callers fired a given
+    submission ("tick10_first_send", "daily_periodic", or "manual", see
+    scheduler.py and server.py's telemetry_submit_now()) so a server
+    log line can answer "was this the daily automatic send or someone
+    clicking Submit Now" without guessing from timing alone. Never
+    added to the outgoing payload itself -- that's a separate wire
+    schema the webhost side validates against, not worth touching for
+    a purely diagnostic, appliance-local distinction.
     """
     try:
         public_key_b64 = device_identity.get_public_key_b64()
@@ -119,8 +130,8 @@ def submit(instance_id: str, payload: dict, timeout: float = 15.0) -> bool:
         resp.raise_for_status()
 
         logger.info(
-            "[*] Telemetry: Community submission accepted (%d devices).",
-            len(payload.get("devices", [])),
+            "[*] Telemetry: Community submission accepted (%d devices, trigger=%s).",
+            len(payload.get("devices", [])), trigger_source,
         )
 
         try:
@@ -130,5 +141,5 @@ def submit(instance_id: str, payload: dict, timeout: float = 15.0) -> bool:
 
         return True
     except Exception as e:
-        logger.warning(f"[*] Telemetry: Community submission failed: {e}")
+        logger.warning(f"[*] Telemetry: Community submission failed (trigger={trigger_source}): {e}")
         return False

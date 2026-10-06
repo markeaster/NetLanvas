@@ -21,6 +21,13 @@ echo "This will stop the NetLanvas service and remove it from this Mac."
 echo "Your network database and settings will be left in place at:"
 echo "  /Library/Application Support/NetLanvas/data"
 echo ""
+echo "If this appliance is registered to a NetLanvas account (Multi-Site /"
+echo "Appliance Inventory Cloud Sync or a paid plan), its device slot stays reserved on"
+echo "your account for up to 30 days of inactivity before it's freed"
+echo "automatically. To free it immediately instead, open this appliance's"
+echo "Settings page first and click "De-register This Device" before"
+echo "continuing here."
+echo ""
 read -p "Continue? [y/N] " CONFIRM
 if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
     echo "Cancelled."

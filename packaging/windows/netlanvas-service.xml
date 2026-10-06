@@ -30,7 +30,7 @@
   <logpath>C:\ProgramData\NetLanvas\logs</logpath>
 
   <env name="NETLANVAS_MODE" value="native" />
-  <env name="NETLANVAS_VERSION" value="v3.20.0" />
+  <env name="NETLANVAS_VERSION" value="v3.30.0" />
   <env name="DB_PATH" value="C:\ProgramData\NetLanvas\data\network.db" />
   <env name="NETLANVAS_TLS_DIR" value="C:\ProgramData\NetLanvas\data\tls" />
   <env name="NETLANVAS_CONFIG_DIR" value="C:\ProgramData\NetLanvas\data\tls" />

@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import hashlib
 import re
 import json
 import base64
@@ -24,11 +25,16 @@ from security.auth import (
     SESSION_COOKIE_NAME, credentials_exist, create_initial_user,
     verify_login, create_session, revoke_session,
     verify_setup_token, clear_setup_token,
+    get_session_id, is_stamp_confirmed, mark_stamp_confirmed,
+    generate_recovery_token, store_recovery_token, verify_recovery_token,
+    clear_recovery_token, reset_credentials, revoke_all_sessions_for_user,
+    get_sole_user_id,
 )
 from security.middleware import check_session
 from security.welcome import delete_welcome_file, get_setup_token
+from security.recovery import write_recovery_file, print_recovery_file, delete_recovery_file, get_recovery_token, RECOVERY_PATH
 from security.rate_limit import is_rate_limited, record_attempt, clear_attempts, get_client_ip
-from security import device_identity, registration
+from security import device_identity, registration, sync_client
 from security.cert_manager import detect_own_lan_ip
 from security.credential_vault import encrypt_password
 from telemetry import payload_builder as telemetry_payload_builder
@@ -97,6 +103,46 @@ def _filter_display_noise_ips(rows: list[dict]) -> list[dict]:
         if row.get("ip_address") and not _is_real_ip(row["ip_address"]):
             row["ip_address"] = None
     return rows
+
+
+def _collapse_stale_same_subnet_bindings(rows: list[dict]) -> list[dict]:
+    """
+    Real user report, 2026-09-25: a relocated UniFi AP that moved from a
+    DHCP address to a static lease on the SAME subnet showed as
+    "multihomed" and rendered as two separate nodes in the Graph UI --
+    both addresses still fresh in the router's own ARP cache (RouterOS
+    doesn't expire an entry just because the client stopped using it),
+    so both l3_bindings rows for that one MAC carried recent last_seen
+    timestamps, and api_dashboard_data's l2_interfaces-LEFT-JOIN-
+    l3_bindings fans that MAC out into two ledger rows -- same root
+    cause class as CLIENTFANOUT-1, a different query.
+
+    Can't just collapse every MAC to its single most-recent binding,
+    though: _annotate_subnet_and_primary's own docstring is explicit
+    that a MAC with real addresses on DIFFERENT subnets (genuine
+    multihoming) is supposed to produce one row per subnet. The actual
+    distinguishing signal is the SUBNET, not the MAC alone -- two
+    bindings for one MAC on the SAME subnet is never real concurrent
+    multihoming (a NIC doesn't have two addresses on one subnet at
+    once under normal DHCP/static use), it's an IP-migration artifact.
+    Keeps the most-recently-seen row per (mac_address, subnet); rows on
+    a different subnet for the same MAC are untouched. Must run after
+    _annotate_subnet_and_primary (needs its subnet field) and before
+    _filter_display_noise_ips (order doesn't matter to that one, per
+    its own docstring, but keeping ip_address intact a little longer
+    costs nothing).
+    """
+    best_by_key = {}
+    order = []
+    for row in rows:
+        key = (row.get("mac_address"), row.get("subnet"))
+        existing = best_by_key.get(key)
+        if existing is None:
+            best_by_key[key] = row
+            order.append(key)
+        elif (row.get("last_seen") or "") > (existing.get("last_seen") or ""):
+            best_by_key[key] = row
+    return [best_by_key[key] for key in order]
 
 
 def _annotate_subnet_and_primary(rows: list[dict], conn) -> list[dict]:
@@ -209,32 +255,42 @@ if NETLANVAS_MODE == "native":
 else:
     REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
     REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-    # The Redis password is generated once per install (redis_secrets_init
-    # in docker-compose.yaml, the same generate-once-persist-to-a-file
-    # pattern already used for the TLS cert and device identity key) and
-    # written to the same ./config host mount this process already has
-    # mounted, rather than a fixed literal shared across every install.
-    #
-    # Some deployments of this same code path never run a real Redis
-    # service at all (a minimal API-only build with no queue behind it,
-    # for instance) and never write this file. Redis absence there is
-    # meant to be tolerated gracefully at the point of an actual get/set
-    # call -- never at import time -- so a missing file falls back to a
-    # random, never-persisted, this-process-only password instead of
-    # crashing the process outright. Authentication to a real Redis will
-    # still correctly fail (there's nothing on either side to match), but
-    # a deployment with no Redis at all can still start.
+    # REDISAUTH-1 (2026-09-21): was a hardcoded literal
+    # ("SuperSecretRedisPassword123!") identical across every install --
+    # generated once per install now instead (redis_secrets_init in
+    # docker-compose.yaml, same generate-once-persist-to-a-file pattern
+    # already used for the TLS cert and device identity key), written
+    # to the same ./config host mount this process already has mounted.
+    # Fails loudly and immediately if the file is somehow missing --
+    # a silent empty-password fallback would just surface later as a
+    # much more confusing Redis auth failure instead.
     try:
         with open("/app/config/redis.key") as _f:
             REDIS_PASSWORD = _f.read().strip()
     except FileNotFoundError:
+        # REDISAUTH-2 (2026-09-21): found live -- some deployments of
+        # this same non-native code path (the demo site's own minimal
+        # single-container compose file, in particular) never run a
+        # real Redis service or redis_secrets_init at all, and never
+        # did even before REDISAUTH-1. Redis absence there was always
+        # tolerated -- gracefully, at the point of an actual get/set
+        # call, per the existing fallback behavior documented in
+        # docker-compose.yaml's own redis service comment ("No host
+        # address published yet") -- never at import time. Making the
+        # password read a hard, eager crash-on-missing-file broke
+        # exactly that: this process couldn't even start. Falls back
+        # to a random, never-persisted, this-process-only value --
+        # authentication to a real Redis will still correctly fail
+        # (there's nothing to match it), but the process itself no
+        # longer dies over a file that was never expected to exist
+        # here in the first place.
         import secrets as _secrets
         REDIS_PASSWORD = _secrets.token_hex(32)
         logging.getLogger("Netlanvas").warning(
             "[!] /app/config/redis.key not found -- generating an ephemeral, "
             "process-local Redis password instead. Expected on deployments "
-            "with no real Redis service; if this appliance DOES have one, "
-            "something is wrong with the mount."
+            "with no real Redis service (e.g. the read-only demo); if this "
+            "appliance DOES have one, something is wrong with the mount."
         )
     redis_client = aioredis.from_url(f"redis://{REDIS_HOST}:{REDIS_PORT}", password=REDIS_PASSWORD, decode_responses=True, socket_timeout=1.0)
 ARCHIVE_DIR = os.path.join(os.path.dirname(config.DB_PATH), "archives")
@@ -266,6 +322,12 @@ class PromotionRequest(BaseModel): node_id: int; target_type: str
 class SettingUpdateRequest(BaseModel): key: str; value: str
 class ContextActionRequest(BaseModel): node_id: int
 class NodeUpdateRequest(BaseModel): node_id: int; hostname: str = None; device_type: str = None
+class StampConfirmRequest(BaseModel):
+    stamp_text: str
+
+class SyncEnableRequest(BaseModel):
+    passphrase: str
+
 class InventoryUpdateRequest(BaseModel):
     # DEVICE-1: None (the default, and the only value a field takes
     # when the caller's JSON simply omits the key) means "leave this
@@ -290,6 +352,7 @@ class ArchiveAnnotateRequest(BaseModel): filename: str; location: str = ""; note
 class ArchiveDeleteRequest(BaseModel): filename: str
 class LoginRequest(BaseModel): username: str; password: str
 class SetupPasswordRequest(BaseModel): username: str; password: str; setup_token: str
+class RecoveryResetRequest(BaseModel): recovery_token: str; new_username: str; new_password: str
 class RemoteAccessRequest(BaseModel): enabled: bool
 class SNMPv3IdentityCreateRequest(BaseModel): username: str; password: str; priv_password: str
 class SNMPv3ReorderRequest(BaseModel): ordered_ids: list[int]
@@ -630,6 +693,103 @@ async def logout(request: Request, response: Response):
     response.delete_cookie(SESSION_COOKIE_NAME)
     return {"success": True}
 
+# --- Credential recovery (see security/recovery.py) ---
+#
+# Both routes are unauthenticated by necessity -- a forgotten password
+# means there's no session to gate behind. Authorization instead comes
+# from the recovery token, exactly like /api/setup/password's
+# setup_token: unauthenticated-reachable, but its real security comes
+# from the plaintext only ever existing in a host-filesystem file a
+# network attacker can't read.
+
+RECOVERY_REQUEST_MAX_ATTEMPTS = 5
+RECOVERY_REQUEST_WINDOW_SECONDS = 15 * 60
+RECOVERY_RESET_MAX_ATTEMPTS = 10
+RECOVERY_RESET_WINDOW_SECONDS = 15 * 60
+
+@app.post("/api/recovery/request")
+async def recovery_request(request: Request):
+    client_ip = get_client_ip(request)
+
+    if is_rate_limited(client_ip, "recovery_request", RECOVERY_REQUEST_MAX_ATTEMPTS, RECOVERY_REQUEST_WINDOW_SECONDS):
+        logger.warning(f"[RECOVERY] Rate limit exceeded for recovery requests from {client_ip}.")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many recovery requests. Try again later.",
+            headers={"Retry-After": str(RECOVERY_REQUEST_WINDOW_SECONDS)},
+        )
+    record_attempt(client_ip, "recovery_request", RECOVERY_REQUEST_WINDOW_SECONDS)
+
+    conn = get_config_db_connection()
+    try:
+        if not credentials_exist(conn):
+            # Nothing to recover -- that's /api/setup/password's job.
+            # Same 404 either way regardless of which half is true, so
+            # this can't be used to probe whether setup has run yet.
+            raise HTTPException(status_code=404, detail="Not found.")
+
+        token = generate_recovery_token()
+        store_recovery_token(conn, token)
+        recovery_url = str(request.base_url).rstrip("/") + "/login.html"
+        write_recovery_file(token, recovery_url)
+        print_recovery_file()
+        logger.warning(f"[RECOVERY] Recovery requested from {client_ip}. Token written to {RECOVERY_PATH}.")
+
+        response = {"success": True, "recovery_file_path": str(RECOVERY_PATH)}
+        # NATIVE-9-equivalent: see security/recovery.py's get_recovery_token()
+        # docstring -- safe only because native mode binds 127.0.0.1
+        # exclusively. Never surface the plaintext here on the
+        # container path, where this route can be LAN-reachable.
+        if NETLANVAS_MODE == "native":
+            response["recovery_token"] = get_recovery_token()
+        return response
+    finally:
+        conn.close()
+
+@app.post("/api/recovery/reset")
+async def recovery_reset(req: RecoveryResetRequest, request: Request):
+    client_ip = get_client_ip(request)
+
+    if is_rate_limited(client_ip, "recovery_reset", RECOVERY_RESET_MAX_ATTEMPTS, RECOVERY_RESET_WINDOW_SECONDS):
+        logger.warning(f"[RECOVERY] Rate limit exceeded for recovery-reset attempts from {client_ip}.")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Try again later.",
+            headers={"Retry-After": str(RECOVERY_RESET_WINDOW_SECONDS)},
+        )
+
+    conn = get_config_db_connection()
+    try:
+        if not verify_recovery_token(conn, req.recovery_token):
+            record_attempt(client_ip, "recovery_reset", RECOVERY_RESET_WINDOW_SECONDS)
+            logger.warning(f"[RECOVERY] Failed recovery-token attempt from {client_ip}.")
+            if NETLANVAS_MODE == "native":
+                token_hint = "Click \"Forgot username or password?\" again to request a fresh one."
+            else:
+                token_hint = ("Check `docker exec netlanvas_api cat /app/tls/recovery.txt` "
+                               "for the current token.")
+            raise HTTPException(status_code=403, detail=f"Invalid or expired recovery token. {token_hint}")
+
+        new_username = req.new_username.strip()
+        if not new_username:
+            raise HTTPException(status_code=400, detail="Username cannot be blank.")
+        if len(req.new_password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+        user_id = get_sole_user_id(conn)
+        if user_id is None:
+            raise HTTPException(status_code=404, detail="Not found.")
+
+        reset_credentials(conn, user_id, new_username, req.new_password)
+        revoke_all_sessions_for_user(conn, user_id)
+        clear_recovery_token(conn)
+        delete_recovery_file()
+        clear_attempts(client_ip, "recovery_reset")
+        logger.warning(f"[RECOVERY] Credentials reset from {client_ip}. All existing sessions revoked.")
+        return {"success": True}
+    finally:
+        conn.close()
+
 # --- Device registration / entitlement (see punch list REG-1..4, ACCT-3/4/7) ---
 #
 # REG-2 (initiate) sits behind the normal session gate -- only a logged-in
@@ -724,6 +884,11 @@ async def register_callback(request: Request, challenge: str = "", local_state: 
             # feature -- was a placeholder toggle, see punch list ACCT-4).
             # Keep it working rather than adding a second status source.
             config._set_setting("IS_REGISTERED", "true")
+            # GAP-10 follow-up: a successful (re-)registration clears any
+            # stale NEEDS_RELINK from a prior revoke/expiry -- this is
+            # the same device_uuid coming back with a valid registration,
+            # not a fresh install, so nothing else needs to change here.
+            config._set_setting("NEEDS_RELINK", "false")
         if result.get("telemetry_preference") is True:
             # register-complete.php only ever sends this key for a
             # brand-new device_uuid, and only when true (the account has
@@ -739,6 +904,26 @@ async def register_callback(request: Request, challenge: str = "", local_state: 
         conn.close()
 
 ENTITLEMENT_REFRESH_THRESHOLD_SECONDS = 6 * 3600
+
+def _handle_device_not_registered(conn, instance_id: str) -> None:
+    """
+    GAP-10 follow-up (2026-09-24): the backend gave a definitive answer,
+    not a transport failure -- this device's license was revoked from
+    another instance's dashboard or auto-expired after 30 days of
+    silence. Unlike a timeout/5xx (left alone so a flaky connection
+    doesn't lock a healthy device out), this clears local registration
+    state immediately so Settings reflects reality on its very next
+    read, and sets NEEDS_RELINK so the UI can show "this appliance was
+    unlinked -- re-link to resume" rather than the generic "not
+    registered yet" first-run state.
+    """
+    logger.warning(f"[*] Entitlement: device {instance_id} is no longer active on its account (revoked or expired) -- clearing local registration.")
+    config._set_setting("IS_REGISTERED", "false")
+    config._set_setting("NEEDS_RELINK", "true")
+    registration.store_entitlement_cache(
+        conn, False, False, json.dumps({"deregistered": True, "reason": "revoked_remotely"})
+    )
+
 
 @app.get("/api/register/entitlement")
 async def register_entitlement_status(request: Request):
@@ -776,11 +961,15 @@ async def register_entitlement_status(request: Request):
                         registration.store_entitlement_cache(
                             conn, True, bool(result.get("entitled", False)), json.dumps(result)
                         )
+                    except registration.DeviceNotRegisteredError:
+                        _handle_device_not_registered(conn, instance_id)
                     except Exception as e:
                         logger.warning(f"[*] Entitlement: Live refresh failed, serving cached value: {e}")
 
         cached = registration.get_entitlement_cache(conn)
-        return cached or {"account_linked": False, "entitled": False, "checked_at": None}
+        result = cached or {"account_linked": False, "entitled": False, "checked_at": None}
+        result["needs_relink"] = str(config._get_setting("NEEDS_RELINK", "false")).lower() in ("true", "1", "yes")
+        return result
     finally:
         conn.close()
 
@@ -810,6 +999,8 @@ def _force_refresh_entitlement(instance_id: str) -> None:
         registration.store_entitlement_cache(
             conn, True, bool(result.get("entitled", False)), json.dumps(result)
         )
+    except registration.DeviceNotRegisteredError:
+        _handle_device_not_registered(conn, instance_id)
     except Exception as e:
         logger.warning(f"[*] Entitlement: forced refresh failed: {e}")
     finally:
@@ -870,6 +1061,190 @@ async def _entitlement_background_loop():
 @app.on_event("startup")
 async def _start_entitlement_background_sync():
     asyncio.create_task(_entitlement_background_loop())
+
+SYNC_PENDING_PUSH_POLL_SECONDS = 15
+
+async def _sync_pending_push_loop():
+    """
+    GAP-9 (design doc Sections 6/12): the other half of
+    stage_inventory_snapshot_sync()'s signal in main.py -- that process
+    (netlanvas_core) has no ./tls mount and can't sign a push itself,
+    so it just sets SYNC_PENDING_PUSH and this loop (running in
+    netlanvas_api, which does have the mount) notices it and triggers
+    the real fire-and-forget debounced push from here. Polling, not a
+    direct call between containers, matching how every other
+    cross-container signal in this codebase already goes through the
+    config.db both containers share rather than an internal HTTP hop.
+    """
+    while True:
+        try:
+            pending = config._get_setting("SYNC_PENDING_PUSH", "false")
+            if str(pending).lower() in ("true", "1", "yes"):
+                config._set_setting("SYNC_PENDING_PUSH", "false")
+                trigger_sync_push_debounced()
+        except Exception as e:
+            logger.warning(f"[SYNC] Pending-push poll loop error: {e}")
+        await asyncio.sleep(SYNC_PENDING_PUSH_POLL_SECONDS)
+
+@app.on_event("startup")
+async def _start_sync_pending_push_loop():
+    asyncio.create_task(_sync_pending_push_loop())
+
+@app.post("/api/sync/enable")
+async def api_sync_enable(req: SyncEnableRequest):
+    """
+    Design doc Section 8/15: the real activation mechanism -- takes the
+    Sync Passphrase from this appliance's own browser session (never
+    relayed anywhere else, never logged) and either derives+caches a
+    fresh sync key or confirms an already-cached one still works.
+    Session-gated by the default middleware (not in
+    UNAUTHENTICATED_API_PATHS) -- same reasoning as
+    /api/register/deregister, a destructive/sensitive local action.
+    """
+    try:
+        instance_id = config._get_setting("INSTANCE_ID")
+        is_registered = str(config._get_setting("IS_REGISTERED", "false")).lower() in ("true", "1", "yes")
+        if not instance_id or not is_registered:
+            return {"error": "This device must be registered to your NetLanvas account before enabling sync."}
+
+        conn = get_config_db_connection()
+        try:
+            key = sync_client.get_or_derive_sync_key(conn, instance_id, passphrase=req.passphrase)
+        finally:
+            conn.close()
+
+        # Direct user requirement, 2026-09-25: download before upload is
+        # essential. Awaited here, synchronously, before this endpoint
+        # ever reports success -- a newly-enabled instance must catch up
+        # on the account's existing data first, never start contributing
+        # its own (often sparse, freshly-confirmed) data before it has.
+        # A failed first pull doesn't fail enabling sync itself (network
+        # hiccup, or genuinely nothing to pull yet on a brand-new
+        # account) -- the periodic pull loop retries on its own cadence.
+        pulled = None
+        try:
+            pulled = await _do_sync_pull()
+        except Exception as e:
+            logger.warning(f"[SYNC] First pull-on-enable failed, will retry on the periodic cycle: {e}")
+
+        return {"success": True, "key_fingerprint": hashlib.sha256(key).hexdigest()[:16], "pulled_devices": pulled or 0}
+    except sync_client.SyncKeySaltMismatchError:
+        logger.error("[SYNC] Enable attempt hit a salt mismatch -- server's account_sync_keys row does not match what a previously-linked instance has cached.")
+        return {"error": "This account's sync key doesn't match what's expected. This can happen if the account's sync setup was lost and recreated. Contact support before proceeding -- entering a passphrase here could otherwise create a key that can't decrypt existing synced data."}
+    except sync_client.SyncPassphraseMismatchError:
+        # KEY-CHECK-1: a normal, expected, immediately-fixable mistake
+        # -- unlike the salt-mismatch case above, nothing was lost or
+        # corrupted server-side, a human just typed the wrong thing.
+        # Nothing was cached (get_or_derive_sync_key raises before
+        # ever reaching its own caching step), so simply trying again
+        # with the correct passphrase is the whole fix.
+        logger.warning("[SYNC] Enable attempt rejected: passphrase does not match this account's existing key-check canary.")
+        return {"error": "That passphrase doesn't match the one already set up on another NetLanvas instance in this account. Double-check it and try again."}
+    except Exception as e:
+        logger.error(f"[SYNC] Enable failed: {e}")
+        return {"error": "Could not enable sync. Please check your connection and try again."}
+
+SITE_STAMP_MAX_LENGTH = 60
+
+def _sync_enabled() -> bool:
+    """True once this instance has a cached sync key -- the Site Stamp
+    gate below (design doc Section 3) must be a complete no-op for every
+    install that hasn't enabled Multi-Site Inventory Sync, which is
+    nearly all of them."""
+    return bool(config._get_setting(sync_client.SETTING_KEY_WRAPPED))
+
+def _validate_stamp_text(raw: str) -> str | None:
+    """
+    Server-side validation (design doc Section 3) -- not just
+    client-side, since this text ends up stored and later rendered
+    elsewhere (other instances' UI once pulled). Returns the trimmed,
+    valid text, or None if it fails any rule.
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    if len(text) > SITE_STAMP_MAX_LENGTH:
+        return None
+    if any(ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 for c in text):
+        return None
+    return text
+
+def _current_session_id(request: Request) -> int | None:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        return None
+    conn = get_config_db_connection()
+    try:
+        return get_session_id(conn, token)
+    finally:
+        conn.close()
+
+@app.get("/api/stamp/status")
+async def api_stamp_status(request: Request):
+    """Tells the frontend whether this session still needs the
+    confirmation popup, and pre-fills it with the current Stamp text if
+    so. Always 'confirmed': true when sync isn't enabled -- nothing to
+    gate."""
+    if not _sync_enabled():
+        return {"sync_enabled": False, "confirmed": True, "current_stamp": ""}
+
+    session_id = _current_session_id(request)
+    conn = get_config_db_connection()
+    try:
+        confirmed = session_id is not None and is_stamp_confirmed(conn, session_id)
+    finally:
+        conn.close()
+    current_stamp = config._get_setting("SITE_STAMP", "") or ""
+    return {"sync_enabled": True, "confirmed": confirmed, "current_stamp": current_stamp}
+
+@app.post("/api/stamp/confirm")
+async def api_stamp_confirm(req: StampConfirmRequest, request: Request):
+    """
+    The popup's 'OK to stamp / sync' action (design doc Section 3).
+    Whatever text is in the field becomes the current Stamp (updating
+    the setting if changed) and marks THIS session confirmed for its
+    remaining lifetime -- every write for the rest of the session
+    inherits it with no further prompts.
+    """
+    stamp = _validate_stamp_text(req.stamp_text)
+    if stamp is None:
+        return {"error": "Please enter a short site name (1-60 characters, no control characters)."}
+
+    session_id = _current_session_id(request)
+    if session_id is None:
+        return {"error": "Your session has expired. Please log in again."}
+
+    config._set_setting("SITE_STAMP", stamp)
+    conn = get_config_db_connection()
+    try:
+        mark_stamp_confirmed(conn, session_id)
+    finally:
+        conn.close()
+    return {"success": True, "stamp": stamp}
+
+@app.get("/api/sync/recovery-key")
+async def api_sync_recovery_key():
+    """
+    Design doc Section 14, Layer 3: the user-held backup of the
+    account's KDF salt, for the one disaster scenario neither the
+    server's own hourly backup nor another instance's local cache
+    covers -- both lost together. Returns 404 until sync has actually
+    been enabled once (nothing to export yet); the salt itself is not
+    secret (Section 5), so this file is safe to store conveniently
+    rather than needing the same care as a password.
+    """
+    salt_b64 = config._get_setting(sync_client.SETTING_KDF_SALT)
+    if not salt_b64:
+        raise HTTPException(status_code=404, detail="Sync hasn't been enabled on this instance yet.")
+
+    instance_id = config._get_setting("INSTANCE_ID")
+    return {
+        "netlanvas_recovery_key": True,
+        "kdf_salt": salt_b64,
+        "kdf_algorithm": "argon2id",
+        "exported_from_instance": instance_id,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 @app.post("/api/register/deregister")
 async def register_deregister(request: Request):
@@ -1407,6 +1782,20 @@ async def telemetry_preview():
         logger.error(f"[TELEMETRY] preview failed: {e}")
         return {"error": "An internal error occurred. See server logs for details."}
 
+# RATE-LIMIT (2026-09-24, punch list item): this endpoint previously had
+# NO appliance-side cooldown at all -- only the webhost's generic per-IP
+# rate limit applied, which exists to catch abuse across many installs,
+# not repeated clicks from one. 5 minutes is long enough to stop
+# accidental double-clicks/impatient repeat-clicking from burning
+# handshakes against the public endpoint, short enough that a legitimate
+# "did that setting change actually take" check never feels blocked.
+# Persisted via config, not an in-memory global like the automatic
+# triggers' own throttles -- this is a user-initiated action and should
+# stay rate-limited across a restart, not quietly reset one.
+_MANUAL_TELEMETRY_SUBMIT_COOLDOWN_SECONDS = 5 * 60
+_LAST_MANUAL_TELEMETRY_SUBMIT_SETTING_KEY = "_LAST_MANUAL_TELEMETRY_SUBMIT_AT"
+
+
 @app.post("/api/telemetry/submit-now")
 async def telemetry_submit_now():
     """
@@ -1414,7 +1803,10 @@ async def telemetry_submit_now():
     submission of the current payload through the exact same handshake
     (submitter.submit) as every automatic send. Requires SUBMIT_TELEMETRY
     to already be enabled -- this button doesn't itself opt someone in,
-    it only sends once they already have.
+    it only sends once they already have. Rate-limited (see
+    _MANUAL_TELEMETRY_SUBMIT_COOLDOWN_SECONDS above); tagged with
+    trigger_source="manual" so server logs can tell this apart from the
+    two automatic sends in telemetry/scheduler.py.
     """
     submit_telemetry = str(config._get_setting("SUBMIT_TELEMETRY", "false")).lower() in ("true", "1", "yes")
     if not submit_telemetry:
@@ -1423,6 +1815,16 @@ async def telemetry_submit_now():
     instance_id = config._get_setting("INSTANCE_ID")
     if not instance_id:
         return {"error": "No instance ID yet -- try again after the appliance has fully started."}
+
+    last_manual_at_raw = config._get_setting(_LAST_MANUAL_TELEMETRY_SUBMIT_SETTING_KEY)
+    if last_manual_at_raw:
+        try:
+            elapsed = time.time() - float(last_manual_at_raw)
+        except ValueError:
+            elapsed = _MANUAL_TELEMETRY_SUBMIT_COOLDOWN_SECONDS  # corrupted stored value -- fail open, don't block a legitimate submit over it
+        if elapsed < _MANUAL_TELEMETRY_SUBMIT_COOLDOWN_SECONDS:
+            wait_seconds = int(_MANUAL_TELEMETRY_SUBMIT_COOLDOWN_SECONDS - elapsed)
+            return {"error": f"Please wait {wait_seconds}s before submitting again."}
 
     try:
         payload = telemetry_payload_builder.build_payload(config, config.DB_PATH)
@@ -1434,7 +1836,15 @@ async def telemetry_submit_now():
         if not log_sample:
             log_sample = telemetry_log_sampler.get_preview_sample(config, config.DB_PATH)
         payload["log_sample"] = log_sample
-        ok = telemetry_submitter.submit(instance_id, payload)
+        # Set on ATTEMPT, not just success -- same reasoning as
+        # scheduler.py's maybe_send_daily (see its docstring): throttling
+        # only on success would let a run of failures retry with no
+        # backoff at all, hammering the endpoint instead of waiting.
+        config._set_setting(
+            _LAST_MANUAL_TELEMETRY_SUBMIT_SETTING_KEY, time.time(),
+            description="Unix timestamp of the last manual telemetry submission -- rate-limits the Preview page's Submit Now button.",
+        )
+        ok = telemetry_submitter.submit(instance_id, payload, trigger_source="manual")
         if ok:
             _force_refresh_entitlement(instance_id)
             return {"success": True}
@@ -2327,6 +2737,7 @@ async def api_topology(archive: str = Query(None)):
             WHERE (b.ip_address IS NOT NULL AND (COALESCE(b.is_public, 0) = 0 OR b.discovery_source = 'ROUTER_INTERFACE')) OR n.device_type IN ('Unmanaged Switch', 'Access Point', 'Switch / WAP')
         ''')
         interfaces = _annotate_subnet_and_primary([dict(row) for row in cursor.fetchall()], conn)
+        interfaces = _collapse_stale_same_subnet_bindings(interfaces)
         interfaces = _filter_display_noise_ips(interfaces)
 
         cursor.execute("SELECT b.ip_address, i.node_id FROM l3_bindings b JOIN l2_interfaces i ON b.mac_address = i.mac_address WHERE b.ip_address IS NOT NULL")
@@ -2352,10 +2763,11 @@ async def api_topology(archive: str = Query(None)):
         # the previous query JOINed the two directly, so any device
         # with N owned IPs fanned out into N result rows here, each
         # incrementing client_counts and producing its own duplicate
-        # box in the FBD view. Confirmed live: a real appliance host (one
-        # real MAC, three owned IPs -- LAN + two Docker bridge gateways)
-        # showed as 3 identical clients behind the same switch, which
-        # showed "Clients: 8" with only 3 distinct devices actually drawn.
+        # box in the FBD view. Confirmed live: a lab Raspberry Pi (one real
+        # MAC, three owned IPs -- LAN + two Docker bridge gateways)
+        # showed as 3 identical "homelab-pi" clients behind
+        # Netgear-GS748Tv5-Works, and Netgear-GS110TP-Core showed
+        # "Clients: 8" with only 3 distinct devices actually drawn.
         # b.ip_address IS NOT NULL was only ever meant as an EXISTENCE
         # check ("this device has some known IP, worth counting at
         # all") -- EXISTS preserves that filter without multiplying
@@ -2456,6 +2868,7 @@ async def api_dashboard_data(archive: str = Query(None)):
             WHERE (b.ip_address IS NOT NULL AND (COALESCE(b.is_public, 0) = 0 OR b.discovery_source = 'ROUTER_INTERFACE')) OR n.device_type IN ('Unmanaged Switch', 'Access Point', 'Switch / WAP')
         ''')
         endpoint_ledger = _annotate_subnet_and_primary([dict(row) for row in cursor.fetchall()], conn)
+        endpoint_ledger = _collapse_stale_same_subnet_bindings(endpoint_ledger)
         endpoint_ledger = _filter_display_noise_ips(endpoint_ledger)
         cursor.execute('SELECT COUNT(DISTINCT l.local_switch_ip) FROM infrastructure_links l')
         total_switches = cursor.fetchone()[0]
@@ -2492,7 +2905,7 @@ async def api_inventory_list():
                       location, asset_tag, serial_number, model, purchase_date, warranty_expiry,
                       last_known_hostname, last_known_vendor, last_known_device_type, last_known_ip,
                       last_known_os_family, last_known_http_header, category, market_segment,
-                      first_discovered, last_synced, created_at, updated_at
+                      site_stamp, first_discovered, last_synced, created_at, updated_at
                FROM verified_devices ORDER BY COALESCE(last_synced, updated_at) DESC"""
         ).fetchall()]
         inv_conn.close()
@@ -2527,12 +2940,230 @@ async def api_inventory_list():
         logger.error(f"[API] inventory list failed: {e}")
         return {"error": "An internal error occurred. See server logs for details."}
 
+SYNC_PUSH_DEBOUNCE_SECONDS = 5
+_sync_debounce_task = None
+
+def trigger_sync_push_debounced() -> None:
+    """
+    GAP-9 fix (design doc Sections 6/12): fire-and-forget, never blocks
+    its caller. Coalesces a burst of writes into one push after
+    SYNC_PUSH_DEBOUNCE_SECONDS of quiet by cancelling and replacing any
+    already-pending debounce task, same principle as every other
+    batched-write pattern in this codebase. No-op if sync was never set
+    up on this instance (no cached key) -- most installs never touch
+    this code path at all.
+    """
+    global _sync_debounce_task
+    if _sync_debounce_task is not None and not _sync_debounce_task.done():
+        _sync_debounce_task.cancel()
+    _sync_debounce_task = asyncio.create_task(_sync_push_after_debounce())
+
+async def _sync_push_after_debounce() -> None:
+    try:
+        await asyncio.sleep(SYNC_PUSH_DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        return  # superseded by a newer write within the debounce window
+    try:
+        await _do_sync_push()
+    except Exception as e:
+        logger.warning(f"[SYNC] Debounced push failed, will retry on next trigger: {e}")
+
+async def _do_sync_push() -> None:
+    instance_id = config._get_setting("INSTANCE_ID")
+    if not instance_id:
+        return
+    conn = get_config_db_connection()
+    try:
+        key = sync_client.get_or_derive_sync_key(conn, instance_id)
+    except ValueError:
+        return  # sync not configured on this instance -- normal, not an error
+    except sync_client.SyncKeySaltMismatchError as e:
+        logger.error(f"[SYNC] {e}")
+        return
+    finally:
+        conn.close()
+
+    inv_conn = sqlite3.connect(config.INVENTORY_DB_PATH)
+    inv_conn.row_factory = sqlite3.Row
+    devices = [dict(r) for r in inv_conn.execute("SELECT * FROM verified_devices").fetchall()]
+    inv_conn.close()
+    plaintext = json.dumps({"devices": devices}).encode("utf-8")
+
+    await asyncio.to_thread(sync_client.push_inventory_blob, instance_id, key, plaintext)
+
+
+def _merge_pulled_devices(own_instance_id: str, blobs: list[dict]) -> int:
+    """
+    Merges every OTHER instance's decrypted device list into this
+    instance's own verified_devices, so Inventory shows one unified
+    cross-site view -- the whole point of this feature (Section 1).
+    Skips this device's own instance_id -- pulling back what it just
+    pushed is a no-op at best.
+
+    Deliberately NOT a timestamp-newer-wins merge (real gap found
+    2026-09-25, caught before shipping): a brand new install's first
+    confirmation of a device is often sparse (bare hostname, no asset
+    tag/serial/notes yet) but always the NEWEST by definition, so
+    last-write-wins would let it clobber a richer, long-curated record
+    from another instance purely because it's fresher. Field-level
+    instead: an existing non-empty local field is NEVER overwritten by
+    a pull, no matter how new the remote row is -- a remote value only
+    ever fills in a field that's currently empty locally. A MAC never
+    seen locally at all is inserted fresh with everything the remote
+    row has. Returns rows actually written (inserted or had at least
+    one field filled in).
+    """
+    written = 0
+    inv_conn = sqlite3.connect(config.INVENTORY_DB_PATH)
+    inv_conn.row_factory = sqlite3.Row
+    columns = {row[1] for row in inv_conn.execute("PRAGMA table_info(verified_devices)")}
+    for blob in blobs:
+        if blob["instance_id"] == own_instance_id:
+            continue
+        for device in blob["data"].get("devices", []):
+            mac = device.get("mac_address")
+            if not mac:
+                continue
+            cols = [c for c in device.keys() if c in columns]
+            existing = inv_conn.execute(
+                f"SELECT {', '.join(cols)} FROM verified_devices WHERE mac_address = ?", (mac,)
+            ).fetchone()
+
+            if existing is None:
+                placeholders = ", ".join("?" for _ in cols)
+                inv_conn.execute(
+                    f"INSERT INTO verified_devices ({', '.join(cols)}) VALUES ({placeholders})",
+                    [device[c] for c in cols],
+                )
+                written += 1
+                continue
+
+            fill_cols, fill_vals = [], []
+            for c in cols:
+                if c == "mac_address":
+                    continue
+                local_val = existing[c]
+                remote_val = device[c]
+                if (local_val is None or local_val == "") and remote_val not in (None, ""):
+                    fill_cols.append(c)
+                    fill_vals.append(remote_val)
+            if fill_cols:
+                set_clause = ", ".join(f"{c} = ?" for c in fill_cols)
+                inv_conn.execute(
+                    f"UPDATE verified_devices SET {set_clause} WHERE mac_address = ?",
+                    [*fill_vals, mac],
+                )
+                written += 1
+    inv_conn.commit()
+    inv_conn.close()
+    return written
+
+
+async def _do_sync_pull() -> int | None:
+    """
+    GAP found 2026-09-25: push had a real fire-and-forget trigger
+    (GAP-9) but nothing ever actually called pull_and_decrypt() --
+    a second instance had no way to receive what the first ever
+    pushed. Returns None if sync isn't configured (normal, not an
+    error) or the pull failed; otherwise the count merged.
+
+    Ordering matters and is enforced by the caller, not by anything
+    inherent here: on first activation (api_sync_enable) this must run
+    and complete BEFORE that endpoint reports success, so a newly
+    enabled instance always catches up on the account's existing data
+    before it starts contributing its own -- never the other way
+    round.
+    """
+    instance_id = config._get_setting("INSTANCE_ID")
+    if not instance_id:
+        return None
+    conn = get_config_db_connection()
+    try:
+        key = sync_client.get_or_derive_sync_key(conn, instance_id)
+    except ValueError:
+        return None  # sync not configured on this instance -- normal, not an error
+    except sync_client.SyncKeySaltMismatchError as e:
+        logger.error(f"[SYNC] {e}")
+        return None
+    finally:
+        conn.close()
+
+    # Direct bandwidth concern, 2026-09-25: a periodic pull with no
+    # filtering re-downloads every other instance's FULL ciphertext
+    # blob every cycle regardless of whether anything changed. This
+    # cursor (instance_id -> last successfully merged updated_at) is
+    # sent to pull.php so it only returns what's actually newer --
+    # empty on a brand-new instance's first pull, which correctly
+    # returns everything for that one catch-up.
+    try:
+        cursor = json.loads(config._get_setting("SYNC_PULL_CURSOR", "{}") or "{}")
+    except (ValueError, TypeError):
+        cursor = {}
+
+    try:
+        blobs = await asyncio.to_thread(sync_client.pull_and_decrypt, instance_id, key, cursor)
+    except Exception as e:
+        logger.warning(f"[SYNC] Pull failed: {e}")
+        return None
+
+    written = await asyncio.to_thread(_merge_pulled_devices, instance_id, blobs)
+
+    # Advance the cursor only for blobs actually received this round --
+    # anything pull.php filtered out as unchanged keeps its existing
+    # cursor entry untouched, so a transient decrypt failure on one
+    # blob (see pull_and_decrypt's own docstring) doesn't silently
+    # advance past data that was never actually merged.
+    for blob in blobs:
+        cursor[blob["instance_id"]] = blob["updated_at"]
+    config._set_setting("SYNC_PULL_CURSOR", json.dumps(cursor))
+
+    return written
+
+
+SYNC_PULL_INTERVAL_SECONDS = 5 * 60
+
+async def _periodic_sync_pull_loop():
+    """
+    Ongoing catch-up for updates other instances push between this
+    one's own activity -- api_sync_enable's own synchronous pull only
+    covers the moment sync is first turned on. No-ops (via
+    _do_sync_pull's own ValueError path) on every install that hasn't
+    enabled sync, true for nearly all of them.
+    """
+    while True:
+        try:
+            written = await _do_sync_pull()
+            if written:
+                logger.info(f"[SYNC] Periodic pull merged {written} device row(s) from other instances.")
+        except Exception as e:
+            logger.warning(f"[SYNC] Periodic pull loop error: {e}")
+        await asyncio.sleep(SYNC_PULL_INTERVAL_SECONDS)
+
+@app.on_event("startup")
+async def _start_periodic_sync_pull_loop():
+    asyncio.create_task(_periodic_sync_pull_loop())
+
 @app.post("/api/inventory/update")
-async def api_inventory_update(req: InventoryUpdateRequest):
+async def api_inventory_update(req: InventoryUpdateRequest, request: Request):
     try:
         mac = req.mac_address.strip().lower()
         if not mac:
             return {"error": "MAC address is required."}
+
+        # Site Stamp gate (design doc Section 3) -- complete no-op
+        # unless sync is actually enabled on this instance. When it is,
+        # every write into verified_devices must be attributable to a
+        # site; the frontend shows the confirm-and-edit popup on this
+        # specific signal and retries once confirmed.
+        if _sync_enabled():
+            session_id = _current_session_id(request)
+            conn_check = get_config_db_connection()
+            try:
+                confirmed = session_id is not None and is_stamp_confirmed(conn_check, session_id)
+            finally:
+                conn_check.close()
+            if not confirmed:
+                return {"error": "stamp_confirmation_required", "current_stamp": config._get_setting("SITE_STAMP", "") or ""}
 
         # None (field omitted from the JSON entirely) -> leave it alone.
         # "" (field explicitly sent blank) -> clear it (NULL). See the
@@ -2544,6 +3175,15 @@ async def api_inventory_update(req: InventoryUpdateRequest):
             "purchase_date": req.purchase_date, "warranty_expiry": req.warranty_expiry,
         }
         provided = {k: (v.strip() or None) for k, v in raw_fields.items() if v is not None}
+
+        # Design doc Sections 2/3: tag with the currently-confirmed Site
+        # Stamp and this instance's own id whenever sync is enabled --
+        # the gate above already guarantees confirmation happened this
+        # session before this line is ever reached. Untouched (both
+        # stay NULL) for every install that never enables sync.
+        if _sync_enabled():
+            provided["site_stamp"] = config._get_setting("SITE_STAMP", "") or None
+            provided["instance_id"] = config._get_setting("INSTANCE_ID")
 
         inv_conn = sqlite3.connect(config.INVENTORY_DB_PATH)
         inv_conn.execute("INSERT OR IGNORE INTO verified_devices (mac_address) VALUES (?)", (mac,))
@@ -2581,6 +3221,7 @@ async def api_inventory_update(req: InventoryUpdateRequest):
                 cursor.execute(f"UPDATE logical_nodes SET {', '.join(updates)} WHERE id = ?", params)
                 conn.commit()
             conn.close()
+        trigger_sync_push_debounced()
         return {"success": True}
     except Exception as e:
         logger.error(f"[API] inventory update failed: {e}")
@@ -2626,32 +3267,64 @@ def _persist_inventory_override(node_id: int, user_given_name: str = None, confi
     try:
         conn = get_db_connection(None)
         cursor = conn.cursor()
-        cursor.execute("SELECT mac_address FROM l2_interfaces WHERE node_id = ? LIMIT 1", (node_id,))
+        # INVENTORY-7 (2026-09-25, reported live): was LIMIT 1 with no
+        # ORDER BY -- an arbitrary MAC, not necessarily the same one
+        # engine/unification.py's run_inventory_snapshot_sync() (INVENTORY-6)
+        # now consolidates a multihomed node's inventory row under. A
+        # human edit landing on a different MAC than the canonical one
+        # would silently split a fresh duplicate row right back out of
+        # what INVENTORY-6 just consolidated. ORDER BY mac_address
+        # matches _canonical_mac()'s own "lowest MAC" convention
+        # (pollers/snmp_default_community_detector.py) exactly.
+        cursor.execute("SELECT mac_address FROM l2_interfaces WHERE node_id = ? ORDER BY mac_address LIMIT 1", (node_id,))
         row = cursor.fetchone()
         conn.close()
         if not row or not row["mac_address"]:
             return
         mac = row["mac_address"]
 
+        # Design doc Sections 2/3: the caller (both real call sites)
+        # already checked the Stamp gate before reaching this point, so
+        # tagging here just needs to read the currently-confirmed
+        # values -- same as /api/inventory/update's own write. Both
+        # stay NULL, untouched, when sync isn't enabled.
+        site_stamp = config._get_setting("SITE_STAMP", "") or None if _sync_enabled() else None
+        instance_id = config._get_setting("INSTANCE_ID") if _sync_enabled() else None
+
         inv_conn = sqlite3.connect(config.INVENTORY_DB_PATH)
         inv_conn.execute("""
-            INSERT INTO verified_devices (mac_address, user_given_name, confirmed_device_type, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO verified_devices (mac_address, user_given_name, confirmed_device_type, site_stamp, instance_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(mac_address) DO UPDATE SET
                 user_given_name = COALESCE(excluded.user_given_name, verified_devices.user_given_name),
                 confirmed_device_type = COALESCE(excluded.confirmed_device_type, verified_devices.confirmed_device_type),
+                site_stamp = COALESCE(excluded.site_stamp, verified_devices.site_stamp),
+                instance_id = COALESCE(excluded.instance_id, verified_devices.instance_id),
                 updated_at = CURRENT_TIMESTAMP
-        """, (mac, user_given_name, confirmed_device_type))
+        """, (mac, user_given_name, confirmed_device_type, site_stamp, instance_id))
         inv_conn.commit()
         inv_conn.close()
+
+        if _sync_enabled():
+            trigger_sync_push_debounced()
     except Exception as e:
         logger.warning(f"[API] Failed to persist inventory override for node {node_id}: {e}")
 
 
 @app.post("/api/promote_node")
-async def api_promote_node(req: PromotionRequest):
+async def api_promote_node(req: PromotionRequest, request: Request):
     if req.target_type not in ["Switch", "Access Point", "Smart Switch"]: return {"error": "Invalid target type."}
     try:
+        if _sync_enabled():
+            session_id = _current_session_id(request)
+            conn_check = get_config_db_connection()
+            try:
+                confirmed = session_id is not None and is_stamp_confirmed(conn_check, session_id)
+            finally:
+                conn_check.close()
+            if not confirmed:
+                return {"error": "stamp_confirmation_required", "current_stamp": config._get_setting("SITE_STAMP", "") or ""}
+
         conn = get_db_connection(None)
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM logical_nodes WHERE id = ?", (req.node_id,))
@@ -2768,10 +3441,32 @@ async def get_node_details(node_id: int):
                     "fp_last_updated": row["fp_last_updated"], "http_header": row["http_header"],
                 })
 
-        # _persist_inventory_override's own "which MAC represents this
-        # node in inventory.db" convention -- first l2_interfaces row,
-        # same tie-break SQLite's own unordered LIMIT 1 would give.
-        primary_mac = macs[0] if macs else None
+        # Real bug report, 2026-09-25: Device Inspector kept showing two
+        # Hardware Interfaces for a device that moved IP on the same
+        # subnet, after the same fan-out was already fixed in
+        # api_dashboard_data/api_topology -- this endpoint has its own
+        # separate l2_interfaces-LEFT-JOIN-l3_bindings query and was
+        # never touched by that fix. Same collapse here, for the same
+        # reason: a MAC with two bindings on the SAME subnet is an
+        # IP-migration artifact, not a second real interface.
+        node_profile["interfaces"] = _annotate_subnet_and_primary(node_profile["interfaces"], conn)
+        node_profile["interfaces"] = _collapse_stale_same_subnet_bindings(node_profile["interfaces"])
+
+        # INVENTORY-7 (2026-09-25, reported live): was macs[0] --
+        # whichever row this endpoint's own earlier, unordered query
+        # happened to return first, not necessarily the canonical
+        # (lowest) MAC engine/unification.py's run_inventory_snapshot_
+        # sync() (INVENTORY-6) actually writes a multihomed node's
+        # inventory row under. Confirmed live: this endpoint's
+        # "Inventory & Asset Details" panel went blank for real,
+        # already-populated devices the instant that mismatch hit --
+        # the WHERE mac_address = ? lookup below simply found nothing
+        # for the wrong MAC. min(macs) matches _canonical_mac()'s own
+        # "lowest MAC" convention (pollers/snmp_default_community_
+        # detector.py) and _persist_inventory_override's now-fixed
+        # write-side pick exactly, so read and write always agree on
+        # which MAC "is" a node's inventory identity.
+        primary_mac = min(macs) if macs else None
         node_profile["primary_mac"] = primary_mac
 
         node_profile["findings"] = []
@@ -2794,7 +3489,7 @@ async def get_node_details(node_id: int):
             inv_row = inv_conn.execute(
                 """SELECT notes, location, asset_tag, serial_number, model, purchase_date, warranty_expiry,
                           last_known_hostname, last_known_vendor, last_known_device_type, last_known_ip,
-                          last_known_os_family, first_discovered, last_synced, created_at, updated_at
+                          last_known_os_family, site_stamp, first_discovered, last_synced, created_at, updated_at
                    FROM verified_devices WHERE mac_address = ?""",
                 (primary_mac,)
             ).fetchone()
@@ -2808,8 +3503,18 @@ async def get_node_details(node_id: int):
         return {"error": "An internal error occurred. See server logs for details."}
 
 @app.post("/api/node/update")
-async def update_node_details(req: NodeUpdateRequest):
+async def update_node_details(req: NodeUpdateRequest, request: Request):
     try:
+        if _sync_enabled():
+            session_id = _current_session_id(request)
+            conn_check = get_config_db_connection()
+            try:
+                confirmed = session_id is not None and is_stamp_confirmed(conn_check, session_id)
+            finally:
+                conn_check.close()
+            if not confirmed:
+                return {"error": "stamp_confirmation_required", "current_stamp": config._get_setting("SITE_STAMP", "") or ""}
+
         conn = get_db_connection(None)
         cursor = conn.cursor()
         updates = []

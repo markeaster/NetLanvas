@@ -124,6 +124,46 @@ def validate_session(conn: sqlite3.Connection, token: str) -> int | None:
     return None
 
 
+def get_session_id(conn: sqlite3.Connection, token: str) -> int | None:
+    """
+    Multi-Site Inventory Sync's Site Stamp gate (design doc Section 3)
+    needs the specific session ROW, not just the user_id validate_session()
+    returns -- the confirmation must lapse with THIS session (logout or
+    expiry), not persist across a fresh login the way a user_id-keyed
+    flag would. Same iterate+verify lookup as validate_session() itself;
+    only called from the small set of call sites that actually need
+    per-session state, not on every authenticated request.
+    """
+    if not token:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    rows = conn.execute(
+        "SELECT id, token_hash FROM sessions WHERE expires_at > ?", (now,)
+    ).fetchall()
+    for session_id, token_hash in rows:
+        try:
+            if _hasher.verify(token_hash, token):
+                return session_id
+        except (VerifyMismatchError, InvalidHashError):
+            continue
+    return None
+
+
+def is_stamp_confirmed(conn: sqlite3.Connection, session_id: int) -> bool:
+    row = conn.execute(
+        "SELECT stamp_confirmed_at FROM sessions WHERE id = ?", (session_id,)
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def mark_stamp_confirmed(conn: sqlite3.Connection, session_id: int) -> None:
+    conn.execute(
+        "UPDATE sessions SET stamp_confirmed_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), session_id),
+    )
+    conn.commit()
+
+
 def revoke_session(conn: sqlite3.Connection, token: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
     rows = conn.execute(
@@ -180,3 +220,72 @@ def verify_setup_token(conn: sqlite3.Connection, plaintext: str) -> bool:
 def clear_setup_token(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM setup_token WHERE id = 1")
     conn.commit()
+
+
+# --- Credential recovery token (see security/recovery.py) ---
+#
+# Same single-use, host-file-plaintext trust model as the setup token
+# above, reused for the "I forgot my username/password" case that
+# arises after setup has already completed. Deliberately a separate
+# table/file from setup_token rather than reusing it -- conflating
+# "claim the account" and "reset the account" would make an in-progress
+# recovery request silently invalidate (or be invalidated by) a stray
+# setup-token row, and the two need independent lifetimes.
+
+def generate_recovery_token() -> str:
+    return secrets.token_urlsafe(16)
+
+
+def store_recovery_token(conn: sqlite3.Connection, plaintext: str) -> None:
+    token_hash = hash_password(plaintext)
+    conn.execute(
+        "INSERT INTO recovery_token (id, token_hash, created_at) VALUES (1, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at",
+        (token_hash, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+def verify_recovery_token(conn: sqlite3.Connection, plaintext: str) -> bool:
+    row = conn.execute("SELECT token_hash FROM recovery_token WHERE id = 1").fetchone()
+    if row is None:
+        return False
+    return verify_password(plaintext, row[0])
+
+
+def clear_recovery_token(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM recovery_token WHERE id = 1")
+    conn.commit()
+
+
+def reset_credentials(conn: sqlite3.Connection, user_id: int, new_username: str, new_plaintext_password: str) -> None:
+    """
+    Sets a new username and password on the existing (single) admin
+    user row. Does not touch the users row's id/created_at -- this is a
+    credential reset, not a new account.
+    """
+    conn.execute(
+        "UPDATE users SET username = ?, password_hash = ? WHERE id = ?",
+        (new_username, hash_password(new_plaintext_password), user_id),
+    )
+    conn.commit()
+
+
+def revoke_all_sessions_for_user(conn: sqlite3.Connection, user_id: int) -> None:
+    """
+    Called after a credential reset so a session established under the
+    old (possibly compromised, since recovery implies the old password
+    may be known to someone else) credentials doesn't stay valid.
+    """
+    conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+
+def get_sole_user_id(conn: sqlite3.Connection) -> int | None:
+    """
+    This appliance has exactly one admin user (see create_initial_user's
+    docstring) -- recovery doesn't take a username (that may be exactly
+    what's forgotten), so it needs this to find the one row to reset.
+    """
+    row = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
+    return row[0] if row else None

@@ -8,7 +8,35 @@ has been in development and use since 2026, and the current release
 reflects that history, but earlier internal change history isn't
 included here.
 
-## Unreleased
+## v3.30.0 - 2026-10-06
+
+### New
+
+- **Credential recovery** for the native (Windows/macOS) app: if you
+  forget your admin username or password, a one-time recovery token
+  can be generated and read from a local file that only someone with
+  access to the machine itself can see -- no email address or cloud
+  account required. The native app can even fetch the token for you
+  directly, since reaching that page at all already proves you're on
+  the same machine.
+- **Multi-Site Inventory Sync**: securely sync network inventory data
+  between separate NetLanvas instances (for example, across multiple
+  sites), gated behind an explicit "Site Stamp" confirmation so
+  nothing leaves the appliance without you opting in first.
+- Device discovery now recognizes D-Link's proprietary discovery
+  protocol (DDP) as a passive listener, alongside the existing
+  SSDP/SNMP/mDNS methods.
+
+### Fixed
+
+- A broad set of topology-accuracy and stability fixes: stale ARP
+  entries now retire reliably instead of lingering after a device
+  goes offline, multi-homed devices no longer fan out into duplicate
+  entries in a couple of previously-missed views, and the Windows
+  installer handles a few edge cases (stale version strings, a
+  stuck data-wipe uninstall step) more robustly.
+
+## v3.20.1 - 2026-09-22
 
 - Initial public release of the appliance/client source, under Apache
   2.0.

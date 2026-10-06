@@ -53,7 +53,7 @@
     const style = document.createElement('style');
     style.textContent = `
         #${BANNER_ID} {
-            display: flex; align-items: center; justify-content: center; gap: 10px;
+            display: flex; align-items: center; gap: 10px;
             background: #164e63; color: #a5f3fc; font-size: 12.5px;
             padding: 6px 16px; border-bottom: 1px solid #0e7490;
             /* sticky (not fixed): reserves its own space in normal flow
@@ -69,11 +69,62 @@
                now that this all lives in that same document. */
             position: sticky; top: 0; z-index: 10000;
         }
+        /* Three-column layout so "Found a problem?" stays visually
+           centered on the page (its own natural width, flex: 0 0 auto)
+           while the Site Stamp summary is pinned to the far right --
+           requested directly. The empty left spacer and the right
+           column share flex: 1 1 0 so they always claim equal space on
+           either side of the center group, the standard "centered
+           logo, right-aligned actions" toolbar pattern -- simpler than
+           computing an offset, and correct at any viewport width. */
+        #${BANNER_ID} > .bug-report-spacer { flex: 1 1 0; }
+        #${BANNER_ID} > .bug-report-center {
+            display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
+        }
+        #${BANNER_ID} > .bug-report-site {
+            flex: 1 1 0; display: flex; align-items: center; justify-content: flex-end;
+            gap: 8px; white-space: nowrap; overflow: hidden;
+        }
+        #${BANNER_ID} > .bug-report-site[hidden] { display: none; }
+        #${BANNER_ID} .bug-report-site-value { color: #e0f2fe; font-weight: 600; }
         #${BANNER_ID} button {
             background: #06b6d4; color: #083344; border: none; border-radius: 5px;
             padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
         }
         #${BANNER_ID} button:hover { background: #22d3ee; }
+        /* Secondary action (view-only summary, changing it is the rare
+           path) -- an outline style so it doesn't visually compete with
+           "Report a Bug" for attention in the same banner. */
+        #${BANNER_ID} .bug-report-site button {
+            background: transparent; color: #67e8f9; border: 1px solid #0e7490;
+            padding: 3px 10px;
+        }
+        #${BANNER_ID} .bug-report-site button:hover { background: #0e7490; color: #e0f2fe; }
+        #site-stamp-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 10001;
+            display: flex; align-items: center; justify-content: center; padding: 24px;
+        }
+        #site-stamp-overlay[hidden] { display: none; }
+        #site-stamp-modal {
+            background: #111827; border: 1px solid #374151; border-radius: 10px;
+            width: 100%; max-width: 420px; padding: 20px 22px; color: #e5e7eb; font-size: 13.5px;
+        }
+        #site-stamp-modal h2 { margin: 0 0 8px; font-size: 16px; color: #f3f4f6; }
+        #site-stamp-modal p { margin: 0 0 12px; color: #9ca3af; font-size: 12.5px; line-height: 1.5; }
+        #site-stamp-input {
+            width: 100%; box-sizing: border-box; background: #1f2937; color: #e5e7eb;
+            border: 1px solid #374151; border-radius: 6px; padding: 8px 10px; font-size: 13px;
+        }
+        #site-stamp-error { margin-top: 8px; font-size: 12px; color: #fca5a5; }
+        #site-stamp-error[hidden] { display: none; }
+        #site-stamp-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+        #site-stamp-actions button {
+            border-radius: 6px; padding: 7px 16px; font-size: 13px; font-weight: 600; cursor: pointer; border: none;
+        }
+        #site-stamp-cancel { background: transparent; color: #9ca3af; }
+        #site-stamp-cancel:hover { color: #e5e7eb; }
+        #site-stamp-save { background: #06b6d4; color: #083344; }
+        #site-stamp-save:hover { background: #22d3ee; }
         #bug-report-overlay {
             /* LOCK-1: 10001, deliberately above index.html's own
                locking overlays (tick-lock-overlay/polling-paused-modal,
@@ -150,9 +201,107 @@
     // because Settings' own Register card is easy to miss entirely
     // (real user report, 2026-09-17) and this is the one element
     // guaranteed visible on every page regardless of scan-lock state.
-    banner.innerHTML = 'Found a problem? <button id="bug-report-btn" type="button">Report a Bug</button>' +
-        '<button id="bug-report-register-btn" type="button" hidden>Register</button>';
+    banner.innerHTML =
+        '<div class="bug-report-spacer"></div>' +
+        '<div class="bug-report-center">Found a problem? <button id="bug-report-btn" type="button">Report a Bug</button>' +
+        '<button id="bug-report-register-btn" type="button" hidden>Register</button></div>' +
+        '<div class="bug-report-site" id="bug-report-site" hidden>' +
+        'Current Site / Inventory Stamp: <span class="bug-report-site-value" id="bug-report-site-value"></span>' +
+        '<button id="bug-report-site-change-btn" type="button">Change</button></div>';
     document.body.insertBefore(banner, document.body.firstChild);
+
+    // Requested directly: the Site Stamp should be visible and
+    // changeable from anywhere, not just the pages that happen to
+    // carry their own gated confirm-and-retry popup (device.html,
+    // inventory.html). Deliberately a NEW, self-contained modal here
+    // rather than reaching into one of those pages' existing markup --
+    // this banner (like bug-report-overlay above, see LOCK-1) lives in
+    // index.html's own parent document, while every content page is
+    // loaded inside content_frame's iframe; an iframe's content can
+    // never out-rank the parent document via z-index no matter how
+    // it's set, so a modal defined inside one of those pages could
+    // never reliably display above this banner's own document. Talks
+    // directly to the same /api/stamp/status and /api/stamp/confirm
+    // endpoints those page-local popups already use -- no new backend
+    // surface, just a second front door to it.
+    const siteBanner = document.getElementById('bug-report-site');
+    const siteValueEl = document.getElementById('bug-report-site-value');
+
+    const siteStampOverlay = document.createElement('div');
+    siteStampOverlay.id = 'site-stamp-overlay';
+    siteStampOverlay.hidden = true;
+    siteStampOverlay.innerHTML = `
+        <div id="site-stamp-modal">
+            <h2>Site / Inventory Stamp</h2>
+            <p>A short label for this appliance's site, attached to every device it syncs. Changing it re-tags new writes going forward -- it doesn't relabel what's already synced.</p>
+            <input type="text" id="site-stamp-input" maxlength="60">
+            <div id="site-stamp-error" hidden></div>
+            <div id="site-stamp-actions">
+                <button id="site-stamp-cancel" type="button">Cancel</button>
+                <button id="site-stamp-save" type="button">Save</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(siteStampOverlay);
+
+    const siteStampInput = document.getElementById('site-stamp-input');
+    const siteStampError = document.getElementById('site-stamp-error');
+
+    async function refreshSiteStampBanner() {
+        try {
+            const res = await fetch('/api/stamp/status');
+            const data = await res.json();
+            if (!data.sync_enabled) {
+                siteBanner.hidden = true;
+                return;
+            }
+            siteValueEl.textContent = data.current_stamp || '(not set)';
+            siteBanner.hidden = false;
+        } catch (e) {
+            // Same fail-safe-invisible pattern as the Register button
+            // above -- an unreachable API means "unknown," not "off,"
+            // but there's nothing useful to show either way.
+            siteBanner.hidden = true;
+        }
+    }
+    refreshSiteStampBanner();
+
+    function closeSiteStampModal() {
+        siteStampOverlay.hidden = true;
+        siteStampError.hidden = true;
+    }
+
+    document.getElementById('bug-report-site-change-btn').addEventListener('click', () => {
+        const current = siteValueEl.textContent;
+        siteStampInput.value = current === '(not set)' ? '' : current;
+        siteStampError.hidden = true;
+        siteStampOverlay.hidden = false;
+        siteStampInput.focus();
+    });
+
+    document.getElementById('site-stamp-cancel').addEventListener('click', closeSiteStampModal);
+    siteStampOverlay.addEventListener('click', (e) => { if (e.target === siteStampOverlay) closeSiteStampModal(); });
+
+    document.getElementById('site-stamp-save').addEventListener('click', async () => {
+        try {
+            const res = await fetch('/api/stamp/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stamp_text: siteStampInput.value })
+            });
+            const data = await res.json();
+            if (data.error) {
+                siteStampError.textContent = data.error;
+                siteStampError.hidden = false;
+                return;
+            }
+            siteValueEl.textContent = siteStampInput.value.trim();
+            closeSiteStampModal();
+        } catch (e) {
+            siteStampError.textContent = 'Could not reach this appliance. Please try again.';
+            siteStampError.hidden = false;
+        }
+    });
 
     // Called by bootstrapApp() once it knows the real registration
     // status -- single source of truth, pushed down, not independently

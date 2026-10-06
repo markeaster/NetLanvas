@@ -275,7 +275,27 @@ def apply_auth_migrations(conn):
         expires_at TEXT NOT NULL
     )''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)')
+
+    # Multi-Site Inventory Sync, Site Stamp gate (design doc Section 3):
+    # per-session, not per-user -- must lapse when THIS session ends
+    # (logout or expiry), not persist across a fresh login the way a
+    # user_id-keyed flag would. NULL = not confirmed yet this session.
+    cursor.execute("PRAGMA table_info(sessions)")
+    if not any(row[1] == 'stamp_confirmed_at' for row in cursor.fetchall()):
+        cursor.execute('ALTER TABLE sessions ADD COLUMN stamp_confirmed_at TEXT')
+
     cursor.execute('''CREATE TABLE IF NOT EXISTS setup_token (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        token_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )''')
+
+    # Same shape and trust model as setup_token above (single-row,
+    # plaintext only ever lives in a host-filesystem file, this table
+    # stores only the hash) -- just for resetting credentials after
+    # setup rather than claiming the account the first time. See
+    # security/recovery.py.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS recovery_token (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         token_hash TEXT NOT NULL,
         created_at TEXT NOT NULL
@@ -468,6 +488,14 @@ def apply_inventory_migrations(conn):
         ("market_segment", "TEXT"),
         ("first_discovered", "DATETIME"),
         ("last_synced", "DATETIME"),
+        # Multi-Site Inventory Sync (design doc Sections 2/3/6): every
+        # synced record must be attributable to the instance (and,
+        # via the Site Stamp, the physical site) it came from. NULL on
+        # every row until sync is actually enabled and a write happens
+        # under an active Stamp confirmation -- both columns stay
+        # untouched for every install that never turns this on.
+        ("site_stamp", "TEXT"),
+        ("instance_id", "TEXT"),
     ]:
         if not column_exists(column):
             cursor.execute(f"ALTER TABLE verified_devices ADD COLUMN {column} {ddl}")

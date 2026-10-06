@@ -29,6 +29,20 @@ from security import device_identity
 
 logger = logging.getLogger("netlanvas.registration")
 
+
+class DeviceNotRegisteredError(Exception):
+    """
+    Raised by check_entitlement() when the backend's 404 explicitly says
+    this device is no longer status='active' on its account (revoked
+    from another instance's dashboard, or auto-expired after 30 days of
+    silence) -- distinct from a bare HTTPError so callers can tell
+    "you were unlinked" apart from "couldn't reach the server" (a
+    timeout or 5xx). Only ever raised for a device that already believed
+    itself registered -- check_entitlement() is never called before
+    that.
+    """
+    pass
+
 BACKEND_BASE_URL = "https://netlanvas.com"
 STATE_TOKEN_BYTES = 32
 STATE_LIFETIME_MINUTES = 10
@@ -129,6 +143,13 @@ def check_entitlement(device_uuid: str, submit_telemetry: bool | None = None) ->
         json=body,
         timeout=5,
     )
+    if response.status_code == 404:
+        try:
+            reason = response.json().get("error")
+        except ValueError:
+            reason = None
+        if reason == "device_not_registered":
+            raise DeviceNotRegisteredError(device_uuid)
     response.raise_for_status()
     return response.json()
 

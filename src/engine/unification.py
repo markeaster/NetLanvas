@@ -3,6 +3,7 @@ import logging
 import os
 from engine.config_loader import config
 from engine.hostname_registry import set_hostname_by_mac, PRIORITY_LLDP_SYSNAME, PRIORITY_DHCP
+from security import sync_client
 
 logger = logging.getLogger("Netlanvas.Unification")
 DB_PATH = os.getenv("DB_PATH", "/app/db/network.db")
@@ -450,7 +451,7 @@ def run_inventory_overlay_pass():
     key into a database meant to survive one.
 
     INVENTORY-3 (2026-09-09): this function itself was never the bug --
-    root-caused live that a dark-matter pseudo-switch
+    root-caused live against a lab Raspberry Pi that a dark-matter pseudo-switch
     (see inference_engine.py's run_dark_matter_detection()) is created
     AFTER this same tick's own call to this function, since
     stage_unification_engine() runs before stage_inference_engine() in
@@ -512,24 +513,76 @@ def run_inventory_snapshot_sync():
     run_inventory_overlay_pass() above (network.db -> inventory.db, not
     inventory.db -> network.db), and touches an entirely different set
     of columns (last_known_*, category, market_segment,
-    first_discovered, last_synced) -- never user_given_name/
-    confirmed_device_type/notes/the asset-management fields (location,
-    asset_tag, serial_number, model, purchase_date, warranty_expiry),
-    which stay exactly whatever a human last set them to (or NULL, if
-    nobody ever has). See apply_inventory_migrations()'s own docstring
-    (engine/database.py) for the full reasoning behind keeping these
-    two kinds of data strictly separate on the same row.
+    first_discovered, last_synced) -- notes/the asset-management fields
+    (location, asset_tag, serial_number, model, purchase_date,
+    warranty_expiry) stay exactly whatever a human last set them to (or
+    NULL, if nobody ever has). See apply_inventory_migrations()'s own
+    docstring (engine/database.py) for the full reasoning behind
+    keeping auto-discovered and human-entered data on separate columns
+    of the same row -- INVENTORY-8 below is a deliberate, narrow
+    exception to "never touches the human columns" for exactly two of
+    them.
 
     Runs AFTER run_inventory_overlay_pass() in the tick sequence (see
     main.py's stage_inventory_snapshot_sync(), called right after
     stage_inventory_reoverlay()) so a device's last_known_hostname
     reflects whatever the overlay pass just applied, not a stale
     pre-overlay value.
+
+    INVENTORY-5 (2026-09-25, reported live): every device this
+    instance currently sees on ITS OWN network gets stamped with this
+    instance's own site_stamp/instance_id whenever Multi-Site
+    Inventory Sync is enabled -- previously ONLY the human-edit path
+    (/api/inventory/update et al, server.py's _persist_inventory_
+    override) ever set these two columns, so the vast majority of
+    devices (everything auto-discovered, which is nearly all of them --
+    that's the whole point of this function) stayed permanently
+    unstamped and invisible to the Inventory page's Site filter.
+    site_stamp/instance_id aren't human-entered data the way
+    user_given_name/notes/the asset fields are -- they're this
+    instance's own attribution of "which site actually saw this device
+    live," so unlike those columns this function overwrites them
+    unconditionally on every currently-discovered device rather than
+    only filling them in when empty: a device this instance is live-
+    polling right now genuinely does belong to this instance's site,
+    even if it was previously pulled in from another site's sync push
+    with a different stamp. A complete no-op (both columns genuinely
+    untouched, not merely set to NULL -- they're left out of the query
+    entirely below) for every install that's never enabled sync, same
+    as the human-edit path -- also protects a device this instance
+    once stamped while sync was on from being silently wiped back to
+    NULL on some later tick after sync gets disabled again.
+
+    INVENTORY-8 (2026-09-25, reported live): a real device's inventory
+    row could sit with an empty Name/Device Type in the UI forever,
+    even though last_known_hostname/last_known_device_type right next
+    to it on the same card were already correctly populated -- nothing
+    ever copied a good auto-discovered value INTO the human-editable
+    identity fields, only ever displayed it alongside them. Requested
+    directly: back-fill user_given_name/confirmed_device_type from
+    this tick's discovered hostname/device_type, but ONLY when the
+    field is currently empty -- the exact same fill-empty-only policy
+    already used for cross-site sync's _merge_pulled_devices()
+    (server.py) and INVENTORY-6's own cleanup pass above, just applied
+    within a single row instead of across rows. The moment a human
+    sets either field to a real value (via /api/inventory/update,
+    /api/node/update, or /api/promote_node), this stops touching it --
+    the CASE WHEN below only ever fires while the column is still NULL
+    or ''. Scoped to exactly these two columns, which have an obvious
+    1:1 discovered counterpart (hostname, device_type); the asset-
+    management fields (location, serial number, etc.) have no
+    discovered equivalent to back-fill from and are untouched, same as
+    always.
     """
+    site_cols, site_vals = [], []
+    if config._get_setting(sync_client.SETTING_KEY_WRAPPED):
+        site_cols = ["site_stamp", "instance_id"]
+        site_vals = [config._get_setting("SITE_STAMP", "") or None, config._get_setting("INSTANCE_ID")]
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT i.mac_address, n.hostname, i.vendor, n.device_type,
+        SELECT i.mac_address, i.node_id, n.hostname, i.vendor, n.device_type,
                b.ip_address, n.os_family, i.category, i.market_segment, b.http_header
         FROM l2_interfaces i
         LEFT JOIN logical_nodes n ON i.node_id = n.id
@@ -540,36 +593,108 @@ def run_inventory_snapshot_sync():
     if not rows:
         return 0
 
-    # A multihomed device shows up once per real IP here (one
-    # l3_bindings row each) -- de-duplicate by MAC, preferring a row
-    # that actually has an IP over one that doesn't. Which specific IP
-    # "wins" for a device with several doesn't matter much for a "last
-    # known" snapshot field; this just avoids landing on "no IP" when a
-    # real one was available.
+    # INVENTORY-6 (2026-09-25, reported live): a multihomed device
+    # (e.g. a router with a dozen physical/VLAN interfaces, all
+    # correctly welded into ONE logical_nodes row by the unification
+    # engine) was getting ONE verified_devices row PER INTERFACE MAC
+    # here, not one per logical device -- this function grouped by
+    # bare mac_address, with no concept of node_id at all. Invisible
+    # until the Inventory page's new device-type sort (grouping every
+    # Router together) suddenly stacked a dozen identical "RB5009UG"
+    # cards in a row. Grouped by node_id now (a MAC with no node_id
+    # yet -- a true ghost, never welded -- keeps its own row, nothing
+    # to consolidate); the "prefer the row with a real IP" tie-break
+    # is unchanged, just scoped per-node instead of per-MAC. Written
+    # under the group's canonical (lowest) MAC -- the exact same
+    # convention pollers/snmp_default_community_detector.py's
+    # _canonical_mac() already uses for findings/alerts, so a
+    # multihomed device's inventory identity lines up with everywhere
+    # else in the codebase that already had to solve this.
+    best_data_by_group = {}
+    macs_by_group = {}
+    for mac, node_id, hostname, vendor, device_type, ip, os_family, category, market_segment, http_header in rows:
+        key = node_id if node_id is not None else mac
+        macs_by_group.setdefault(key, []).append(mac)
+        existing = best_data_by_group.get(key)
+        if existing is None or (ip and not existing[3]):
+            best_data_by_group[key] = (hostname, vendor, device_type, ip, os_family, category, market_segment, http_header)
+
     by_mac = {}
-    for mac, hostname, vendor, device_type, ip, os_family, category, market_segment, http_header in rows:
-        if mac not in by_mac or (ip and not by_mac[mac][3]):
-            by_mac[mac] = (hostname, vendor, device_type, ip, os_family, category, market_segment, http_header)
+    for key, data in best_data_by_group.items():
+        by_mac[min(macs_by_group[key])] = data
+
+    base_cols = ["mac_address", "last_known_hostname", "last_known_vendor",
+        "last_known_device_type", "last_known_ip", "last_known_os_family", "category", "market_segment",
+        "last_known_http_header"]
+    all_cols = base_cols + site_cols
+    # INVENTORY-8: back-fill columns, appended after everything else so
+    # base_cols/site_cols' own excluded.col = excluded.col handling
+    # above is untouched. Each gets its OWN conditional clause instead
+    # of the blanket one the auto-only columns use -- an existing
+    # human value must never be overwritten, only an empty one filled.
+    identity_cols = ["user_given_name", "confirmed_device_type"]
+    insert_cols = all_cols + identity_cols
+    placeholders = ", ".join("?" for _ in insert_cols)
+    auto_set_clause = ", ".join(f"{c} = excluded.{c}" for c in all_cols[1:])
+    identity_set_clause = ", ".join(
+        f"{c} = CASE WHEN {c} IS NULL OR {c} = '' THEN excluded.{c} ELSE {c} END"
+        for c in identity_cols
+    )
+    set_clause = f"{auto_set_clause}, {identity_set_clause}, last_synced = CURRENT_TIMESTAMP"
 
     inv_conn = sqlite3.connect(config.INVENTORY_DB_PATH)
     inv_cursor = inv_conn.cursor()
+
+    # Self-healing cleanup for rows this bug already wrote before the
+    # fix above existed (confirmed live: 12 redundant rows across 2
+    # welded devices on the first real install checked). Folds any
+    # non-canonical row's human-entered fields into the canonical
+    # MAC's row first -- field-level fill-empty-only, same policy as
+    # sync's own _merge_pulled_devices() (server.py), so an existing
+    # human value is never overwritten -- then removes the redundant
+    # row. A no-op every tick after the backlog is cleared; only does
+    # real work again if a node's interface set changes.
+    human_cols = ["user_given_name", "confirmed_device_type", "notes", "location",
+        "asset_tag", "serial_number", "model", "purchase_date", "warranty_expiry"]
+    for key, macs in macs_by_group.items():
+        if len(macs) < 2:
+            continue
+        canonical_mac = min(macs)
+        other_macs = [m for m in macs if m != canonical_mac]
+        other_placeholders = ", ".join("?" for _ in other_macs)
+        stray_rows = inv_cursor.execute(
+            f"SELECT {', '.join(human_cols)} FROM verified_devices WHERE mac_address IN ({other_placeholders})",
+            other_macs
+        ).fetchall()
+        if not stray_rows:
+            continue
+        canonical_row = inv_cursor.execute(
+            f"SELECT {', '.join(human_cols)} FROM verified_devices WHERE mac_address = ?", (canonical_mac,)
+        ).fetchone()
+        canonical_vals = list(canonical_row) if canonical_row else [None] * len(human_cols)
+        fill_cols, fill_vals = [], []
+        for idx, col in enumerate(human_cols):
+            if canonical_vals[idx] not in (None, ""):
+                continue
+            for stray in stray_rows:
+                if stray[idx] not in (None, ""):
+                    fill_cols.append(col)
+                    fill_vals.append(stray[idx])
+                    break
+        if fill_cols:
+            inv_cursor.execute("INSERT OR IGNORE INTO verified_devices (mac_address) VALUES (?)", (canonical_mac,))
+            fill_set_clause = ", ".join(f"{c} = ?" for c in fill_cols)
+            inv_cursor.execute(f"UPDATE verified_devices SET {fill_set_clause} WHERE mac_address = ?", [*fill_vals, canonical_mac])
+        inv_cursor.executemany("DELETE FROM verified_devices WHERE mac_address = ?", [(m,) for m in other_macs])
+
     for mac, (hostname, vendor, device_type, ip, os_family, category, market_segment, http_header) in by_mac.items():
-        inv_cursor.execute('''
-            INSERT INTO verified_devices (mac_address, last_known_hostname, last_known_vendor,
-                last_known_device_type, last_known_ip, last_known_os_family, category, market_segment,
-                last_known_http_header, first_discovered, last_synced)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT(mac_address) DO UPDATE SET
-                last_known_hostname = excluded.last_known_hostname,
-                last_known_vendor = excluded.last_known_vendor,
-                last_known_device_type = excluded.last_known_device_type,
-                last_known_ip = excluded.last_known_ip,
-                last_known_os_family = excluded.last_known_os_family,
-                category = excluded.category,
-                market_segment = excluded.market_segment,
-                last_known_http_header = excluded.last_known_http_header,
-                last_synced = CURRENT_TIMESTAMP
-        ''', (mac, hostname, vendor, device_type, ip, os_family, category, market_segment, http_header))
+        base_vals = [mac, hostname, vendor, device_type, ip, os_family, category, market_segment, http_header]
+        identity_vals = [hostname, device_type]
+        inv_cursor.execute(f'''
+            INSERT INTO verified_devices ({', '.join(insert_cols)}, first_discovered, last_synced)
+            VALUES ({placeholders}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(mac_address) DO UPDATE SET {set_clause}
+        ''', base_vals + site_vals + identity_vals)
     inv_conn.commit()
     inv_conn.close()
     return len(by_mac)

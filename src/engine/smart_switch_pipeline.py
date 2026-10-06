@@ -93,16 +93,31 @@ TL-SG105E, both on the user's own network):
   packet capture of a genuine ESCP exchange (e.g. from TP-Link's own
   Easy Smart Configuration Utility talking to the same switch) or
   community-contributed hardware that does respond.
-- D-Link (SmartConsole/DDP, UDP port 62976) and Zyxel (ZON/ZDP,
-  multicast MAC 01:A0:C5:11:11:11): confirmed port/MAC only, no
-  confirmed request/response payload format found anywhere searched.
-  Deliberately NOT implemented -- a prober guessing at unconfirmed
-  bytes would either never get a real reply (a false negative dressed
-  up as a real check) or misparse garbage, which is worse than not
-  having the feature. Left as documented stubs at the bottom of this
-  file, ready for a step_30/step_40 once someone (ideally the
-  community, since this project has neither brand's hardware to test
-  against) can supply real capture data.
+- D-Link (SmartConsole/DDP, UDP port 62976, step 30): real hardware
+  obtained 2026-09-24 (a DGS-1100-05V2) and tested directly. Unlike
+  every step above, this one is a pure PASSIVE listener, not a
+  broadcast-and-collect probe -- an active query got zero reply on 5
+  tried opcodes including a byte-faithful re-send of the real report
+  opcode, so this switch (and plausibly its whole tier) simply doesn't
+  implement query/reply DDP. What DOES exist and was captured live: an
+  ambient periodic report the switch broadcasts on its own schedule,
+  fully decoded and cross-checked against the switch's own Device
+  Information page. See step 30's own comment block for the wire
+  format. Real but low odds of catching a report on any single
+  deep-scan cycle (report timer defaulted to "Never" on the tested
+  unit, and even enabled its minimum interval is 30s) -- kept anyway as
+  free insurance for installs where it IS enabled, same reasoning NSDP
+  above stays despite its own negative result.
+- Zyxel (ZON/ZDP, multicast MAC 01:A0:C5:11:11:11): confirmed MAC only,
+  no confirmed payload format found anywhere searched, and no Zyxel
+  smart-switch hardware available to test against (unlike D-Link
+  above). Deliberately NOT implemented -- a prober guessing at
+  unconfirmed bytes would either never get a real reply (a false
+  negative dressed up as a real check) or misparse garbage, which is
+  worse than not having the feature. Left as a documented stub at the
+  bottom of this file, ready for a step_40 once someone (ideally the
+  community, since this project has no Zyxel hardware) can supply real
+  capture data.
 """
 
 import asyncio
@@ -193,6 +208,37 @@ def _udp_broadcast_probe(client_port: int, switch_port: int, payload: bytes, tim
     finally:
         sock.close()
     return replies
+
+
+def _listen_udp_broadcast(port: int, timeout: float) -> List[Tuple[bytes, str]]:
+    """Blocking (run via asyncio.to_thread) -- binds `port` and listens
+    for `timeout` seconds, sending nothing. Distinct from
+    _udp_broadcast_probe above (which sends first, then collects its own
+    replies): DDP-1 (see step 30 below) confirmed live that some
+    protocols only ever speak on their own schedule, never in response
+    to a query -- this is for those."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    packets: List[Tuple[bytes, str]] = []
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        bind_socket_to_scan_interface(sock)
+        sock.bind(("0.0.0.0", port))
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            try:
+                data, addr = sock.recvfrom(2048)
+                packets.append((data, addr[0]))
+            except socket.timeout:
+                break
+    except OSError as e:
+        logger.debug(f"[SmartSwitch] Passive listen on port {port} failed: {e}")
+    finally:
+        sock.close()
+    return packets
 
 
 # ==============================================================================
@@ -574,15 +620,91 @@ async def step_25_tplink_http() -> StepResult:
 
 
 # ==============================================================================
-# STUBS -- confirmed port/MAC, no confirmed payload format, see module docstring.
-# Not registered (a fake no-op step would look like "we checked and found
-# nothing" when we were never actually able to check at all).
+# STEP 30: D-LINK DDP PASSIVE LISTENER (best-effort -- see module docstring)
+# ==============================================================================
+# DDP-1 (2026-09-24): unlike every step above, this is a pure PASSIVE
+# listener -- no probe is ever sent. Confirmed live against a real
+# DGS-1100-05V2 that an active broadcast query gets ZERO reply on this
+# port, on any of 5 tried opcodes, including a byte-faithful re-send of
+# the real report opcode (A0 00) -- this switch model (and plausibly the
+# whole non-managed "smart" tier, unconfirmed beyond this one unit)
+# simply doesn't implement query/reply DDP, only an ambient periodic
+# broadcast the switch sends entirely on its own schedule.
 #
-# D-Link SmartConsole / DDP: broadcast destination UDP port 62976.
-#   Would be step 30 once someone can supply a real capture.
+# That periodic report's wire format WAS captured and decoded live
+# (report timer set to 30s for the capture): magic EE FE (2B) + sequence
+# number LE (2B) + opcode (2B -- A0 00 is the only value ever observed;
+# an active query got no reply on any tried opcode, so nothing else is
+# handled here) + switch MAC (6B) + switch IP (4B) + 6 reserved/fixed
+# bytes (constant across every captured packet, meaning unconfirmed) +
+# null-padded ASCII fields: model (offset 22, 64 bytes), device type
+# (offset 86, 32 bytes, unused here), firmware version (offset 118, 32
+# bytes). Every field cross-checked exactly against the switch's own
+# Device Information page at capture time.
 #
-# Zyxel ZON / ZDP: L2 multicast to destination MAC 01:A0:C5:11:11:11
-#   (not a UDP broadcast like the others -- needs a raw socket, not just
+# The switch's report timer defaulted to "Never" on the one real unit
+# tested -- meaning this step will find nothing on the vast majority of
+# real networks, where nobody has visited that settings page. Kept in
+# the pipeline anyway, same reasoning NSDP (step 10) stays despite its
+# own confirmed-negative result on this network: free insurance for
+# whichever installs DO have it enabled, for whatever reason. A single
+# _BROADCAST_TIMEOUT-second listen per deep-scan cycle has real but low
+# odds of catching a report on any given cycle at DDP's minimum 30s
+# interval -- this is deliberately NOT a persistent always-on listener
+# (a bigger architectural change, out of scope here); it converges over
+# many cycles rather than catching a report on the first one.
+_DLINK_DDP_PORT = 62976
+_DLINK_DDP_MAGIC = b"\xee\xfe"
+_DLINK_DDP_REPORT_OPCODE = b"\xa0\x00"
+
+
+def _parse_ddp_report(data: bytes) -> Optional[dict]:
+    if len(data) < 156 or data[0:2] != _DLINK_DDP_MAGIC:
+        return None
+    if data[4:6] != _DLINK_DDP_REPORT_OPCODE:
+        return None  # only opcode ever observed -- anything else is unconfirmed territory, don't guess
+
+    def _ascii_field(start: int, end: int) -> Optional[str]:
+        raw = data[start:end].split(b"\x00", 1)[0]
+        try:
+            text = raw.decode("ascii", errors="replace").strip()
+        except Exception:
+            return None
+        return text or None
+
+    return {
+        "mac": ":".join(f"{b:02x}" for b in data[6:12]),
+        "vendor": "D-Link",
+        "model": _ascii_field(22, 86),
+        "name": None,
+        "ip": ".".join(str(b) for b in data[12:16]),
+        "protocol": "DDP",
+        "firmware": _ascii_field(118, 150),
+    }
+
+
+@engine.register(30, "D-Link DDP Passive Listener")
+async def step_30_dlink_ddp() -> StepResult:
+    packets = await asyncio.to_thread(_listen_udp_broadcast, _DLINK_DDP_PORT, _BROADCAST_TIMEOUT)
+    devices = []
+    seen_macs = set()
+    for data, src_ip in packets:
+        parsed = _parse_ddp_report(data)
+        if parsed and parsed["mac"] not in seen_macs:
+            seen_macs.add(parsed["mac"])
+            parsed["source_ip"] = src_ip
+            devices.append(parsed)
+            logger.info(f"[SmartSwitch] DDP: found {parsed.get('model') or 'a D-Link smart switch'} at {src_ip} (MAC {parsed['mac']}) via passive listen")
+    return StepResult(should_continue=True, data=devices or None)
+
+
+# ==============================================================================
+# STUB -- confirmed MAC, no confirmed payload format, see module docstring. Not
+# registered (a fake no-op step would look like "we checked and found nothing"
+# when we were never actually able to check at all).
+#
+# Zyxel ZON / ZDP: L2 multicast to destination MAC 01:A0:C5:11:11:11 (not a
+#   UDP broadcast like the others -- needs a raw socket, not just
 #   SO_BROADCAST). Would be step 40 once someone can supply a real capture.
 # ==============================================================================
 
