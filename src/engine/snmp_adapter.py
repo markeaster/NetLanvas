@@ -640,10 +640,19 @@ async def run_snmp_command(ip, oid, credential: SNMPCredential, walk=False, time
     # the subprocess exits. "-m ''" reproduces this container's own
     # default /etc/snmp/snmp.conf ("mibs :") so overriding SNMPCONFPATH
     # doesn't change MIB-loading behavior. See CWE-214 finding F10.
+    # -Cc ('do not check returned OIDs are increasing'): some agents with
+    # multiple distinct bridge/VLAN contexts (confirmed live on the house
+    # router's dot1dBasePortIfIndex table, 2026-11-01) return a walk whose
+    # OIDs aren't in strict increasing order partway through -- net-snmp
+    # treats that as fatal and exits non-zero, which the check below turns
+    # into a silent 'return None', discarding every line already captured.
+    # Walk-only (snmpget has no multi-row ordering to violate).
+    walk_tolerance_flags = ["-Cc"] if walk else []
+
     if credential.version == SNMPVersion.V2C:
         secret_directives = {"defCommunity": credential.community}
         cmd = [cmd_name, "-v", "2c", "-m", "",
-               "-On", "-Oq", "-t", str(timeout), "-r", str(retries), ip, oid]
+               "-On", "-Oq", *walk_tolerance_flags, "-t", str(timeout), "-r", str(retries), ip, oid]
     else:
         if not credential.is_resolved:
             logger.error(f"[SNMP] Internal error: unresolved v3 credential passed to run_snmp_command for {ip}.")
@@ -662,7 +671,7 @@ async def run_snmp_command(ip, oid, credential: SNMPCredential, walk=False, time
             "defPrivPassphrase": credential.effective_priv_password,
         }
         cmd = [cmd_name, "-v3", "-l", "authPriv", "-a", auth_flag, "-x", priv_flag, "-m", "",
-               "-On", "-Oq", "-t", str(timeout), "-r", str(retries), ip, oid]
+               "-On", "-Oq", *walk_tolerance_flags, "-t", str(timeout), "-r", str(retries), ip, oid]
 
     if any(v is not None and ("\n" in v or "\r" in v) for v in secret_directives.values()):
         logger.error(f"[SNMP] Internal error: credential for {ip} contains a newline; refusing to build snmp.conf.")

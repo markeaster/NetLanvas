@@ -3386,7 +3386,7 @@ async def api_remove_node(req: ContextActionRequest):
         return {"error": "An internal error occurred. See server logs for details."}
 
 @app.get("/api/node/{node_id}")
-async def get_node_details(node_id: int):
+async def get_node_details(node_id: int, archive: str = Query(None)):
     """
     DEVICE-1 (2026-09-09): expanded to actually return everything this
     query was already fetching (wireless_ssid, is_ghost,
@@ -3397,9 +3397,20 @@ async def get_node_details(node_id: int):
     last-known snapshot + human notes -- see engine/unification.py's
     run_inventory_snapshot_sync()), and any currently-active
     device_findings across every MAC on this node.
+
+    2026-10-13: `archive` param added -- this was the one node-detail
+    read endpoint that never accepted it, unlike /api/status,
+    /api/dashboard_data and /api/topology, which all do. device.html
+    has always sent `?archive=...` on this exact fetch (see its own qs
+    construction), so the gap was silent: clicking a device card while
+    viewing ANY Time Machine snapshot opened whatever node_id happened
+    to exist in the LIVE database instead, with no error -- just the
+    wrong device's data. inventory.db lookups below stay unconditional
+    (never archived per-snapshot; same live-inventory behavior
+    /api/inventory already applies regardless of archive context).
     """
     try:
-        conn = get_db_connection(None)
+        conn = get_db_connection(archive)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT

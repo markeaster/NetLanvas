@@ -21,7 +21,7 @@
 ; Settings toggle changes (main.py's _sync_windows_firewall_rule()).
 
 #define MyAppName "NetLanvas"
-#define MyAppVersion "3.30.0"
+#define MyAppVersion "3.30.3"
 #define MyAppPublisher "NetLanvas"
 #define MyAppURL "https://netlanvas.com"
 #define MyDataDir "C:\ProgramData\NetLanvas"
@@ -180,8 +180,17 @@ Filename: "https://127.0.0.1:8899/dashboard/settings.html"; Flags: shellexec ski
 ; "stop" CLI reports success well before the real process tree has
 ; actually exited; this polls for genuine completion instead of
 ; guessing a duration, with a force-kill fallback).
+;
+; NATIVE-19 (2026-10-21): stop-netlanvas.ps1 now also unregisters the
+; service itself (see its own header) -- this used to be a SEPARATE
+; step here, which ran unconditionally even when stop-netlanvas.ps1 had
+; already found nothing registered. Confirmed live: running an
+; uninstall a second time re-triggered this standalone step against an
+; already-unregistered service, and the service came back running with
+; a fresh process tree immediately afterward. Removed rather than
+; guarded, since stop-netlanvas.ps1 already owns this check and a
+; second independent call here can only reintroduce the same race.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\stop-netlanvas.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "StopNetLanvasService"
-Filename: "{app}\netlanvas-service.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "UninstallNetLanvasService"
 
 ; Remove the firewall exception this installer created -- an orphaned
 ; ALLOW rule surviving an uninstall is pure downside (nothing left

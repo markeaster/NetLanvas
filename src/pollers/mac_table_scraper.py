@@ -5,6 +5,7 @@ from engine.config_loader import config
 from engine.snmp_adapter import get_working_credential, adaptive_snmp_query, format_port_name, CREDENTIAL_CACHE
 from engine.snmp_pipeline import run_snmp_pipeline
 from engine.polling_targets import get_representative_targets
+from pollers.fingerprinter import _parse_ifindex_to_mac, _IF_PHYS_ADDRESS_OID
 
 logger = logging.getLogger("Netlanvas.FDB")
 
@@ -23,10 +24,25 @@ async def process_switch_fdb(switch_ip, router_ips, semaphore, is_deep_scan_tick
         task_operstatus = adaptive_snmp_query(switch_ip, "1.3.6.1.2.1.2.2.1.8", walk=True)
         task_highspeed = adaptive_snmp_query(switch_ip, "1.3.6.1.2.1.31.1.1.1.15", walk=True)
         task_speed = adaptive_snmp_query(switch_ip, "1.3.6.1.2.1.2.2.1.5", walk=True)
-        
-        dot1d_res, iftype_res, stack_res, ifDescr_res, oper_res, hspeed_res, speed_res = await asyncio.gather(
-            task_dot1d, task_iftype, task_stack, task_ifdescr, task_operstatus, task_highspeed, task_speed, return_exceptions=True
+        task_ifphys = adaptive_snmp_query(switch_ip, _IF_PHYS_ADDRESS_OID, walk=True)
+
+        dot1d_res, iftype_res, stack_res, ifDescr_res, oper_res, hspeed_res, speed_res, ifphys_res = await asyncio.gather(
+            task_dot1d, task_iftype, task_stack, task_ifdescr, task_operstatus, task_highspeed, task_speed, task_ifphys, return_exceptions=True
         )
+
+        # SELFMAC-1 (2026-11-02): a device's own bridge FDB can list its
+        # OWN interface's MAC as a "self" entry on the port that
+        # interface sits on (confirmed live: a router's FDB listed one
+        # of its own ports' MAC on the same bridge port as a device
+        # wired directly into it, inflating that port's raw_density to
+        # 2 and wrongly re-tripping the router-port backbone penalty
+        # for a port that in reality
+        # hosts exactly one real device). Filter these out at the
+        # source -- a switch/router's own MAC is never a real endpoint
+        # hosted on itself, regardless of which port it reports against.
+        # Reuses the same ifPhysAddress parsing fingerprinter.py already
+        # established for exactly this purpose (own_interface_macs).
+        own_interface_macs = set(_parse_ifindex_to_mac(ifphys_res if isinstance(ifphys_res, list) else []).values())
 
         port_to_ifindex = {}
         if isinstance(dot1d_res, list):
@@ -121,6 +137,8 @@ async def process_switch_fdb(switch_ip, router_ips, semaphore, is_deep_scan_tick
 
         switch_locations = []
         for mac, port, vlan in mac_data:
+            if mac.lower() in own_interface_macs:
+                continue
             port_str = str(port)
             if port_str in port_to_ifindex: port_str = port_to_ifindex[port_str]
             port_str = get_base_physical_port(port_str)
@@ -200,7 +218,15 @@ async def run_mac_table_scraper(is_deep_scan_tick=False):
         for switch_ip, port, _, _, _ in locations:
             port_key = f"{switch_ip}:{port}"
             raw_density[port_key] = raw_density.get(port_key, 0) + 1
-            if port_key not in port_penalties and switch_ip in router_ips: port_penalties[port_key] = 10000
+            # Only a never-before-classified router port with real FAN-OUT
+            # (>1 distinct MAC this poll) gets treated as backbone here --
+            # a single MAC alone on a router port isn't evidence either
+            # way by itself. The real backbone-vs-leaf call for that case
+            # is made per-MAC below, by preferring a genuine switch-side
+            # sighting over the router's one-hop-removed view whenever one
+            # exists, rather than guessing from this port's density alone.
+            if port_key not in port_penalties and switch_ip in router_ips and raw_density.get(port_key, 0) > 1:
+                port_penalties[port_key] = 10000
 
     port_weights = {}
     for port_key, count in raw_density.items():
@@ -211,9 +237,30 @@ async def run_mac_table_scraper(is_deep_scan_tick=False):
     macs_to_purge = []
     
     for mac, locations in global_mac_locations.items():
-        best_location = min(locations, key=lambda loc: port_weights.get(f"{loc[0]}:{loc[1]}", 9999))
+        # NETLOC-1 (2026-11-01): a MAC seen via a switch's own FDB AND via
+        # the router's one-hop-removed view of the same VLAN trunk (e.g. a
+        # device plugged into a real switch port, whose traffic the router
+        # also sees arrive on its own VLAN sub-interface) should always
+        # resolve to the switch's direct sighting -- confirmed live, a
+        # switch port vs. the router's own echo of the same MAC on its
+        # VLAN sub-interface. A switch's FDB is a more authoritative, more
+        # direct signal than the router's view through a trunk, regardless
+        # of either one's raw density -- but only when that switch-side
+        # sighting is a genuinely GOOD one (not itself already-flagged
+        # backbone). A MAC seen only via OTHER switches' own
+        # uplink-toward-router ports isn't a real alternative leaf
+        # position, just the same router-side echo seen from one hop
+        # further out -- preferring it would purge the one genuine
+        # location a device wired directly into the router actually has.
+        good_non_router_locations = [
+            loc for loc in locations
+            if loc[0] not in router_ips and port_weights.get(f"{loc[0]}:{loc[1]}", 9999) < 10000
+        ]
+        candidates = good_non_router_locations or locations
+
+        best_location = min(candidates, key=lambda loc: port_weights.get(f"{loc[0]}:{loc[1]}", 9999))
         best_weight = port_weights.get(f"{best_location[0]}:{best_location[1]}", 9999)
-        
+
         # UNCONDITIONAL BACKBONE DROP
         if best_weight >= 10000: 
             macs_to_purge.append((mac,))

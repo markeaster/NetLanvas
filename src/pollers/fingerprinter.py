@@ -666,7 +666,13 @@ async def run_fingerprinter():
                 # confidence than a sysDescr string match, so this never
                 # runs redundantly on top of a real MIB confirmation.
                 if sys_descr and not (is_bridge or is_lldp) and _SNMP_SWITCH_DESCR_PATTERN.search(sys_descr):
-                    logger.info(f"[*] SNMP Switch Candidate [{ip}]: sysDescr matched \"switch\" -- {sys_descr!r}")
+                    # Deliberately no quote-then-"--" shape here (e.g. "switch" -- 'text') --
+                    # that collided with the Community Telemetry Pipeline's server-side
+                    # SQL-comment-injection heuristic (telemetry_validation.php's
+                    # /['"]\s*--/), rejecting every submission whose log sample happened to
+                    # capture this line with malicious_content_detected. A colon avoids the
+                    # collision without weakening that check for genuine injection attempts.
+                    logger.info(f"[*] SNMP Switch Candidate [{ip}]: sysDescr matched \"switch\": {sys_descr!r}")
                     _write_snmp_switch_candidate(mac, vendor, sys_descr)
             else:
                 # NOARP-2 (2026-09-04): the F7 gateway-identity check just

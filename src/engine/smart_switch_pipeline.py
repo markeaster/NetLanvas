@@ -121,7 +121,9 @@ TL-SG105E, both on the user's own network):
 """
 
 import asyncio
+import ipaddress
 import logging
+import re
 import socket
 import sqlite3
 import struct
@@ -129,10 +131,19 @@ import time
 import requests
 from typing import NamedTuple, Optional, Any, Dict, Callable, Tuple, List
 
+try:
+    import fcntl
+except ImportError:  # Windows: no fcntl, and interface scoping is Linux-only anyway
+    fcntl = None
+
 from engine.auto_discovery import bind_socket_to_scan_interface
 from engine.config_loader import config
 
 logger = logging.getLogger("Netlanvas.SmartSwitch")
+
+_SIOCGIFADDR = 0x8915
+_SIOCGIFNETMASK = 0x891B
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 _BROADCAST_TIMEOUT = 3.0  # seconds to collect replies after each broadcast
 
@@ -210,18 +221,59 @@ def _udp_broadcast_probe(client_port: int, switch_port: int, payload: bytes, tim
     return replies
 
 
+def _primary_lan_interface() -> Optional[str]:
+    try:
+        with open("/proc/net/route", "r") as f:
+            for line in f.readlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "00000000":
+                    return parts[0]
+    except OSError:
+        pass
+    return None
+
+
+def _interface_ipv4_network(iface: str) -> Optional[ipaddress.IPv4Network]:
+    if fcntl is None:
+        return None
+    try:
+        name = iface.encode()[:15].ljust(256, b"\0")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            addr = socket.inet_ntoa(fcntl.ioctl(s.fileno(), _SIOCGIFADDR, name)[20:24])
+            mask = socket.inet_ntoa(fcntl.ioctl(s.fileno(), _SIOCGIFNETMASK, name)[20:24])
+        return ipaddress.IPv4Network(f"{addr}/{mask}", strict=False)
+    except OSError:
+        return None
+
+
 def _listen_udp_broadcast(port: int, timeout: float) -> List[Tuple[bytes, str]]:
     """Blocking (run via asyncio.to_thread) -- binds `port` and listens
     for `timeout` seconds, sending nothing. Distinct from
     _udp_broadcast_probe above (which sends first, then collects its own
     replies): DDP-1 (see step 30 below) confirmed live that some
     protocols only ever speak on their own schedule, never in response
-    to a query -- this is for those."""
+    to a query -- this is for those.
+
+    Scoped to one interface on Linux: SCAN_INTERFACE_OVERRIDE if set,
+    otherwise the default-route NIC. Packets from outside that NIC's
+    subnet are dropped, and if the interface can't be scoped or has no
+    IPv4 address the listener stays closed rather than falling back to
+    accepting on every interface."""
+    iface = str(config._get_setting("SCAN_INTERFACE_OVERRIDE", "") or "").strip() or _primary_lan_interface()
+    allowed_net = None
+    if iface:
+        allowed_net = _interface_ipv4_network(iface)
+        if allowed_net is None:
+            logger.warning(f"[SmartSwitch] Passive listen on port {port} skipped: interface '{iface}' is missing or has no IPv4 address")
+            return []
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     packets: List[Tuple[bytes, str]] = []
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        bind_socket_to_scan_interface(sock)
+        if iface:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
+        else:
+            bind_socket_to_scan_interface(sock)
         sock.bind(("0.0.0.0", port))
         deadline = time.monotonic() + timeout
         while True:
@@ -231,11 +283,13 @@ def _listen_udp_broadcast(port: int, timeout: float) -> List[Tuple[bytes, str]]:
             sock.settimeout(remaining)
             try:
                 data, addr = sock.recvfrom(2048)
+                if allowed_net is not None and ipaddress.ip_address(addr[0]) not in allowed_net:
+                    continue
                 packets.append((data, addr[0]))
             except socket.timeout:
                 break
     except OSError as e:
-        logger.debug(f"[SmartSwitch] Passive listen on port {port} failed: {e}")
+        logger.warning(f"[SmartSwitch] Passive listen on port {port} failed: {e}")
     finally:
         sock.close()
     return packets
@@ -667,7 +721,7 @@ def _parse_ddp_report(data: bytes) -> Optional[dict]:
     def _ascii_field(start: int, end: int) -> Optional[str]:
         raw = data[start:end].split(b"\x00", 1)[0]
         try:
-            text = raw.decode("ascii", errors="replace").strip()
+            text = _CONTROL_CHARS_RE.sub("", raw.decode("ascii", errors="replace")).strip()
         except Exception:
             return None
         return text or None

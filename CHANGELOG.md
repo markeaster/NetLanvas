@@ -8,6 +8,41 @@ has been in development and use since 2026, and the current release
 reflects that history, but earlier internal change history isn't
 included here.
 
+## v3.30.3 - 2026-11-02
+
+### Fixed
+
+- A device wired directly into a router port (no switch in between)
+  could render as a disconnected node instead of showing a real edge
+  into the router. Three compounding bugs: an SNMP walk spanning
+  several merged bridge instances could come back with entries
+  slightly out of order, which the SNMP client treated as a fatal
+  error and discarded the whole table instead of tolerating it; a
+  never-before-seen router port got an unconditional "this must be
+  backbone" penalty the instant it was seen at all, with no check
+  against actual traffic fan-out or the device's other known
+  locations; and a switch/router's own bridge table can list its own
+  interface's MAC as a "self" entry on its own port, inflating that
+  port's apparent device count and wrongly re-triggering the previous
+  bug's penalty. All three fixed.
+- Windows uninstall could hang for hours if the app's shutdown wedged
+  (the uninstaller's own stop step had no timeout of its own), or
+  could bring the service right back a few seconds after removing it
+  (force-killing it made Windows' Service Control Manager treat that
+  as a crash and restart it). Both fixed.
+- Clicking into a device's detail page while viewing a Time Machine
+  archive could silently show the wrong device's data -- that one
+  endpoint had never been taught to respect archive mode the way the
+  rest of the app already does.
+- The passive listener for D-Link's discovery protocol could bind to
+  every network interface instead of scoping itself the way every
+  other discovery listener already does, and now drops packets
+  arriving from outside its own subnet.
+- A routine log line describing a detected switch could collide with
+  the Community Telemetry backend's own injection-detection heuristic,
+  causing that submission to be rejected as malicious content on
+  affected installs. Fixed; no security check was weakened.
+
 ## v3.30.0 - 2026-10-06
 
 ### New
