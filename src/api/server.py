@@ -707,6 +707,26 @@ RECOVERY_REQUEST_WINDOW_SECONDS = 15 * 60
 RECOVERY_RESET_MAX_ATTEMPTS = 10
 RECOVERY_RESET_WINDOW_SECONDS = 15 * 60
 
+def _request_is_loopback(request: Request) -> bool:
+    """
+    SECNL-1: the real TCP peer, NOT get_client_ip()'s X-Forwarded-For-
+    trusting value. get_client_ip() trusts XFF because in container
+    mode Caddy is the only thing that can set it -- but native mode has
+    no reverse proxy in front of it at all, so XFF there is a raw,
+    unverified client-supplied header. Using get_client_ip() here would
+    let any network attacker send `X-Forwarded-For: 127.0.0.1` and get
+    the plaintext recovery token back regardless of where they actually
+    are. request.client.host is the socket peer address; it can't be
+    spoofed without completing the TCP handshake from that address.
+    """
+    host = request.client.host if request.client else None
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 @app.post("/api/recovery/request")
 async def recovery_request(request: Request):
     client_ip = get_client_ip(request)
@@ -735,12 +755,17 @@ async def recovery_request(request: Request):
         print_recovery_file()
         logger.warning(f"[RECOVERY] Recovery requested from {client_ip}. Token written to {RECOVERY_PATH}.")
 
-        response = {"success": True, "recovery_file_path": str(RECOVERY_PATH)}
-        # NATIVE-9-equivalent: see security/recovery.py's get_recovery_token()
-        # docstring -- safe only because native mode binds 127.0.0.1
-        # exclusively. Never surface the plaintext here on the
-        # container path, where this route can be LAN-reachable.
-        if NETLANVAS_MODE == "native":
+        response = {"success": True, "recovery_file_path": str(RECOVERY_PATH), "mode": NETLANVAS_MODE}
+        # SECNL-1 (was NATIVE-9-equivalent): native mode's convenience of
+        # auto-filling the token only holds while this specific request
+        # actually arrived over loopback -- NETLANVAS_MODE == "native" is
+        # NOT equivalent to that once NATIVE_REMOTE_ACCESS_ENABLED rebinds
+        # the listener to 0.0.0.0 (see main.py's bind_host). Checking the
+        # mode alone let a LAN attacker on a remote-access-enabled
+        # instance pull the plaintext token straight out of this
+        # response and take over the admin account with no credentials
+        # at all. Gate on the real connection, not the deployment mode.
+        if NETLANVAS_MODE == "native" and _request_is_loopback(request):
             response["recovery_token"] = get_recovery_token()
         return response
     finally:

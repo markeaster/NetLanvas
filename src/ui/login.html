@@ -215,9 +215,10 @@
 
                 const parts = [];
                 if (body.recovery_token) {
-                    // Native mode: same-machine trust already established by
-                    // reaching this endpoint at all -- see
-                    // security/recovery.py's get_recovery_token() docstring.
+                    // Only ever present when this specific request arrived
+                    // over loopback (see server.py's _request_is_loopback) --
+                    // its presence, not the deployment mode, is what tells us
+                    // same-machine trust actually applies to this request.
                     parts.push('Recovery token (filled in below):<br>' + escapeHTML(body.recovery_token));
                     document.getElementById('recovery-token').value = body.recovery_token;
                 }
@@ -225,6 +226,15 @@
                     const path = escapeHTML(body.recovery_file_path);
                     if (body.recovery_token) {
                         parts.push('Also written to:<br>' + path);
+                    } else if (body.mode === 'native') {
+                        // Native, but this request didn't arrive over
+                        // loopback (e.g. remote web viewing is enabled and
+                        // you're on another device) -- a docker command
+                        // would be meaningless here. The file is only
+                        // readable from the machine NetLanvas itself runs on.
+                        parts.push(
+                            'Open this file on the machine NetLanvas is running on:<br>' + path
+                        );
                     } else {
                         // Container deployment: no same-machine auto-fetch
                         // available (see get_recovery_token()'s docstring) --

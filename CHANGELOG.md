@@ -8,6 +8,39 @@ has been in development and use since 2026, and the current release
 reflects that history, but earlier internal change history isn't
 included here.
 
+## v3.30.4 - 2026-11-02
+
+### Security
+
+- **CVSS 9.6 (remote-access configuration) / High (default localhost-bound
+  configuration): unauthenticated recovery-token disclosure on native
+  (desktop) installs, leading to full admin account takeover.**
+  `POST /api/recovery/request` is deliberately unauthenticated — it's
+  the entry point for a forgotten-password flow, so there's no session
+  to gate it behind — and on native installs it returned the plaintext
+  single-use recovery token directly in the JSON response body. That
+  token alone is sufficient authorization for `POST /api/recovery/reset`,
+  which rewrites the admin's credentials and revokes every session. The
+  behavior was gated only on the deployment mode (`native`), on the
+  assumption that native installs always listen on `127.0.0.1` only —
+  but the "Enable remote web viewing" setting intentionally rebinds the
+  listener to `0.0.0.0` so other devices on the LAN can reach it, and
+  this endpoint never got a matching exception. Any device on the same
+  network as a remote-access-enabled native install could pull the
+  token from the response and take over the admin account with zero
+  credentials.
+
+  Fixed: the plaintext token is now only ever included when the specific
+  request actually arrived over the loopback interface, verified against
+  the real TCP connection rather than a client-settable header
+  (`X-Forwarded-For`, which native mode has no reverse proxy in front of
+  to validate). Container/server deployments were never affected — they
+  never returned the token in this response to begin with.
+
+  Reported responsibly, with a complete working reproduction, by
+  independent security researcher **dracaryxxd**. Thank you for the
+  disclosure.
+
 ## v3.30.3 - 2026-11-02
 
 ### Fixed
