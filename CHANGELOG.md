@@ -8,6 +8,53 @@ has been in development and use since 2026, and the current release
 reflects that history, but earlier internal change history isn't
 included here.
 
+## v3.31.1 - 2026-11-03
+
+### New
+
+- **API tokens, for scripts and automation that aren't a browser.** Your
+  appliance's API can now be reached by something other than your own
+  browser session — a script, a cron job, or an AI assistant. Create any
+  number of independently-labeled tokens from `Settings → API Tokens`,
+  each scoped by a single read-only flag enforced against the actual
+  request method, not a per-route allowlist that has to be kept in sync
+  as the API grows. Tokens are hashed with Argon2id before they're ever
+  written to disk, the same treatment the admin password already gets;
+  the plaintext is shown exactly once, at creation. Token management
+  itself (creating or revoking a token) always requires a real session,
+  never a Bearer token — a leaked token can authenticate reads, but can
+  never be used to mint or revoke another token to escalate itself.
+
+- **An [MCP](https://modelcontextprotocol.io) server, so an AI assistant
+  can read your network directly.** Built on the token system above:
+  your appliance now exposes a Model Context Protocol server — the open,
+  vendor-neutral standard for letting an AI assistant call into an
+  application's own data, instead of copy-pasting a screenshot of your
+  topology map into a chat window. Mounted alongside the rest of the
+  appliance's API; no separate container, no relay through any
+  third-party server. Eight read-only tools: full topology, a single
+  device's detail, the flat inventory, alerts, engine status, VLANs,
+  subnets, and the dashboard summary. Every tool is read-only by
+  construction — nothing reachable through it can change a setting,
+  acknowledge an alert, or write anything back to the appliance.
+  Authenticated over the same Bearer-token model as above rather than the
+  MCP spec's own OAuth 2.1 extension (which would require this appliance
+  to become its own OAuth authorization server) — a deliberate choice for
+  a single-admin, LAN-first appliance, the same pattern Home Assistant's
+  own core MCP integration and Grafana's self-hosted MCP server both use.
+
+### Security
+
+- **API tokens are now revoked on a credential reset, same as sessions.**
+  Resetting your admin username or password already revoked every active
+  session at that same moment, for the obvious reason — a session started
+  under now-possibly-compromised credentials shouldn't stay valid. API
+  tokens (above) are a separate credential that threat model never
+  covered: a token minted during a brief session compromise would have
+  survived a password change indefinitely, until manually noticed and
+  revoked in Settings. Fixed: every API token is now revoked at the same
+  moment every session is.
+
 ## v3.30.4 - 2026-11-02
 
 ### Security

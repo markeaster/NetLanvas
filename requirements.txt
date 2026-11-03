@@ -27,6 +27,13 @@ argon2-cffi==25.1.0
 # TLS keypair generation -- see src/security/cert_manager.py
 cryptography==50.0.0
 
+# MCP (Model Context Protocol) server -- see src/api/mcp_server.py.
+# Pinned to the exact version the integration was built and verified
+# against (2.3.0 renamed FastMCP to MCPServer, moved auth to require
+# AuthSettings -- see that file's own docstring for why we don't use
+# the SDK's built-in auth framework).
+mcp==2.3.0
+
 # --- Resolved transitive dependencies, pinned for full build
 #     reproducibility (captured via `docker exec netlanvas_api pip
 #     freeze` against a verified working arm64 build -- see punch list

@@ -295,6 +295,38 @@
             </div>
         </section>
 
+        <!-- API TOKENS -->
+        <section id="api-tokens-section" class="bg-gray-800 p-6 rounded-lg border border-gray-700 shadow-xl transition-opacity duration-300">
+            <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                <h2 class="text-blue-500 font-bold uppercase text-sm tracking-wider">API Tokens</h2>
+            </div>
+            <p class="text-[10px] text-gray-200 mb-4 leading-relaxed">
+                Long-lived tokens for non-browser access to this appliance's API (e.g. an MCP server). Each token is shown in full exactly once, at creation -- copy it immediately, it cannot be retrieved again. A read-only token may only call GET routes; a full token has the same access as a logged-in session, except it can never create or revoke tokens itself.
+            </p>
+            <div id="api-token-reveal" class="hidden bg-amber-900/10 border border-amber-900/30 rounded p-3 text-xs font-mono leading-relaxed mb-4">
+                <div class="text-amber-400 font-bold uppercase tracking-wider text-[10px] mb-2">Copy this now -- it will not be shown again</div>
+                <div class="flex items-center gap-2">
+                    <input type="text" id="api-token-reveal-value" readonly class="flex-1 bg-gray-900 border border-gray-600 text-gray-200 text-xs font-mono rounded p-2">
+                    <button onclick="copyRevealedToken()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-2 px-3 rounded shadow transition text-xs uppercase tracking-widest whitespace-nowrap">Copy</button>
+                    <button onclick="dismissRevealedToken()" class="bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold font-mono py-2 px-3 rounded shadow transition text-xs uppercase tracking-widest whitespace-nowrap">Done</button>
+                </div>
+            </div>
+            <div id="api-tokens-list" class="space-y-2 mb-4">
+                <div class="text-gray-200 text-xs font-mono italic">Loading...</div>
+            </div>
+            <div class="flex gap-2 items-end border-t border-gray-700 pt-4">
+                <div class="flex-1">
+                    <label class="block text-[10px] text-gray-200 uppercase tracking-wider mb-1">Label</label>
+                    <input type="text" id="api-token-new-label" placeholder="e.g. claude-mcp" class="bg-gray-900 border border-gray-600 text-gray-200 text-sm font-mono rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-2">
+                </div>
+                <div class="flex items-center gap-2 pb-2">
+                    <input type="checkbox" id="api-token-new-readonly" checked class="rounded bg-gray-900 border-gray-600 text-blue-600 focus:ring-blue-500">
+                    <label for="api-token-new-readonly" class="text-[10px] text-gray-200 uppercase tracking-wider">Read-only</label>
+                </div>
+                <button onclick="createApiToken()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold font-mono py-2 px-4 rounded shadow transition text-xs uppercase tracking-widest whitespace-nowrap">+ Create</button>
+            </div>
+        </section>
+
         <!-- SYSTEM OPERATIONS -->
         <section id="operations-section" class="bg-gray-800 p-6 rounded-lg border border-red-900/50 shadow-xl transition-opacity duration-300">
             <h2 class="text-red-500 font-bold mb-4 uppercase text-sm tracking-wider border-b border-gray-700 pb-2">System Operations</h2>
@@ -442,6 +474,120 @@
             } catch (e) {
                 showToast('[!] Failed to save new order.', 'error');
                 await loadSnmpV3Identities(); // revert to server truth on failure
+            }
+        }
+
+        // --- API Tokens ---
+        let apiTokens = [];
+        let lastRevealedToken = '';
+
+        async function loadApiTokens() {
+            try {
+                const res = await fetch('/api/tokens');
+                const data = await res.json();
+                apiTokens = data.tokens || [];
+                renderApiTokensList();
+            } catch (e) {
+                console.error('Failed to load API tokens', e);
+            }
+        }
+
+        function renderApiTokenRow(token) {
+            const scope = token.is_read_only
+                ? '<span class="text-cyan-400">read-only</span>'
+                : '<span class="text-amber-400">full access</span>';
+            const lastUsed = token.last_used_at
+                ? new Date(token.last_used_at).toLocaleString()
+                : 'never';
+            return `
+                <div class="flex items-center justify-between bg-gray-900/50 border border-gray-700/50 rounded p-2.5">
+                    <div class="flex flex-col">
+                        <span class="text-gray-200 font-mono text-sm">${escapeHTML(token.label)}</span>
+                        <span class="text-gray-200 font-mono text-[10px] opacity-70">${scope} &middot; created ${new Date(token.created_at).toLocaleString()} &middot; last used ${lastUsed}</span>
+                    </div>
+                    <button onclick="removeApiToken(${token.id})" class="text-red-400 hover:text-red-300 p-1" title="Revoke">&#10005;</button>
+                </div>
+            `;
+        }
+
+        function renderApiTokensList() {
+            const container = document.getElementById('api-tokens-list');
+            if (!container) return;
+            if (apiTokens.length === 0) {
+                container.innerHTML = '<div class="text-gray-200 text-xs font-mono italic">No API tokens issued.</div>';
+            } else {
+                container.innerHTML = apiTokens.map(renderApiTokenRow).join('');
+            }
+        }
+
+        async function createApiToken() {
+            const labelInput = document.getElementById('api-token-new-label');
+            const readonlyInput = document.getElementById('api-token-new-readonly');
+            const label = labelInput.value.trim();
+            if (!label) {
+                showToast('A label is required.', 'error');
+                return;
+            }
+            try {
+                const res = await fetch('/api/tokens', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ label, is_read_only: readonlyInput.checked })
+                });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                labelInput.value = '';
+                readonlyInput.checked = true;
+                await loadApiTokens();
+                revealToken(data.token);
+                showToast('[*] API token created.', 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
+            }
+        }
+
+        function revealToken(plaintext) {
+            lastRevealedToken = plaintext;
+            const box = document.getElementById('api-token-reveal');
+            const field = document.getElementById('api-token-reveal-value');
+            field.value = plaintext;
+            box.classList.remove('hidden');
+        }
+
+        function dismissRevealedToken() {
+            lastRevealedToken = '';
+            const box = document.getElementById('api-token-reveal');
+            const field = document.getElementById('api-token-reveal-value');
+            field.value = '';
+            box.classList.add('hidden');
+        }
+
+        async function copyRevealedToken() {
+            if (!lastRevealedToken) return;
+            try {
+                await navigator.clipboard.writeText(lastRevealedToken);
+                showToast('[*] Copied to clipboard.', 'success');
+            } catch (e) {
+                showToast('[!] Clipboard unavailable -- select and copy manually.', 'error');
+            }
+        }
+
+        async function removeApiToken(id) {
+            if (!confirm('Revoke this API token? Any integration using it will stop working immediately.')) return;
+            try {
+                const res = await fetch(`/api/tokens/${id}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(`[!] ${data.error}`, 'error');
+                    return;
+                }
+                await loadApiTokens();
+                showToast('[*] API token revoked.', 'success');
+            } catch (e) {
+                showToast('[!] API Unreachable', 'error');
             }
         }
 
@@ -1610,6 +1756,7 @@
 
             loadSettings();
             loadSnmpV3Identities();
+            loadApiTokens();
             initializeLogStream();
             refreshPollingUI();
             setInterval(refreshPollingUI, 5000);

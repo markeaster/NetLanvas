@@ -17,6 +17,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from security.auth import SESSION_COOKIE_NAME, validate_session
+from security.api_tokens import validate_api_token
 from security.rate_limit import is_rate_limited, record_attempt, get_client_ip
 from engine.config_loader import config
 
@@ -96,11 +97,61 @@ UNAUTHENTICATED_API_PATHS = {
 SESSION_CHECK_MAX_ATTEMPTS = 30
 SESSION_CHECK_WINDOW_SECONDS = 5 * 60
 
+# API-token auth (security/api_tokens.py) is accepted on every gated
+# /api/* route EXCEPT token management itself -- a stolen full-scope
+# token must never be able to mint or revoke other tokens (that's a
+# self-escalation/persistence path a session-only gate closes outright).
+# Only a real logged-in browser session may manage tokens. Also reused
+# by server.py's own MCP mount gate (api/mcp_server.py) -- see
+# authenticate_bearer_token below.
+API_TOKEN_MANAGEMENT_PATH_PREFIX = "/api/tokens"
+API_TOKEN_CHECK_MAX_ATTEMPTS = 30
+API_TOKEN_CHECK_WINDOW_SECONDS = 5 * 60
+
 
 def path_requires_auth(path: str) -> bool:
     if not path.startswith("/api/"):
         return False
     return path not in UNAUTHENTICATED_API_PATHS
+
+
+async def authenticate_bearer_token(request: Request, get_conn_fn) -> tuple[dict | None, JSONResponse | None]:
+    """
+    Extracts, rate-limits, and validates an `Authorization: Bearer
+    <token>` header against security/api_tokens.py. Returns
+    (token_row, None) on success, or (None, response) with the
+    401/429/None-if-absent response to return as-is. Shared by
+    check_session below (/api/* -- adds its own GET-only-for-read-only
+    check on top) and server.py's MCP mount gate (api/mcp_server.py --
+    uses token validity alone, no method restriction, since every MCP
+    tool is read-only by construction and the transport is POST-based
+    JSON-RPC regardless of whether a given call reads or writes).
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None, None
+
+    plaintext = auth_header[len("Bearer "):].strip()
+    client_ip = get_client_ip(request)
+    if is_rate_limited(client_ip, "api_token_check", API_TOKEN_CHECK_MAX_ATTEMPTS, API_TOKEN_CHECK_WINDOW_SECONDS):
+        logger.warning(f"[AUTH] Rate limit exceeded for API token checks from {client_ip}.")
+        return None, JSONResponse(status_code=429, content={"detail": "Too many requests. Try again later."})
+
+    try:
+        conn = get_conn_fn()
+        try:
+            token_row = validate_api_token(conn, plaintext)
+        finally:
+            conn.close()
+    except Exception:
+        return None, JSONResponse(status_code=401, content={"detail": "Authentication required."})
+
+    if token_row is None:
+        record_attempt(client_ip, "api_token_check", API_TOKEN_CHECK_WINDOW_SECONDS)
+        logger.warning(f"[AUTH] Invalid API token presented from {client_ip}.")
+        return None, JSONResponse(status_code=401, content={"detail": "Invalid API token."})
+
+    return token_row, None
 
 
 async def check_session(request: Request, get_conn_fn) -> JSONResponse | None:
@@ -119,6 +170,25 @@ async def check_session(request: Request, get_conn_fn) -> JSONResponse | None:
     # blocked in server.py's demo_read_only middleware regardless of
     # session state). See engine/config_loader.py's DEMO_MODE docstring.
     if config.DEMO_MODE:
+        return None
+
+    # Bearer API token -- an alternative to the session cookie, for
+    # non-browser callers (e.g. an MCP server). Checked first when
+    # present; falls through to the cookie path below when absent, so a
+    # browser session and a token-authenticated caller can both reach
+    # the same routes without interfering with each other. Excluded from
+    # token-management routes themselves -- see
+    # API_TOKEN_MANAGEMENT_PATH_PREFIX above.
+    if request.headers.get("authorization", "").startswith("Bearer ") and not request.url.path.startswith(API_TOKEN_MANAGEMENT_PATH_PREFIX):
+        token_row, error = await authenticate_bearer_token(request, get_conn_fn)
+        if error is not None:
+            return error
+
+        if token_row["is_read_only"] and request.method != "GET":
+            logger.warning(f"[AUTH] Read-only API token '{token_row['label']}' attempted {request.method} {request.url.path}.")
+            return JSONResponse(status_code=403, content={"detail": "This token is read-only."})
+
+        request.state.api_token = token_row
         return None
 
     token = request.cookies.get(SESSION_COOKIE_NAME)

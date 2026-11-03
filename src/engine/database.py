@@ -301,6 +301,24 @@ def apply_auth_migrations(conn):
         created_at TEXT NOT NULL
     )''')
 
+    # Long-lived tokens for non-browser/programmatic API access (e.g. an
+    # MCP server) -- independent credential from sessions above, own
+    # lifecycle. Same hash-only trust model, never credential_vault.py's
+    # reversible encryption (a token authenticates INBOUND like a
+    # password, it's not a secret NetLanvas presents outward). See
+    # security/api_tokens.py. is_read_only is the token's scope: checked
+    # against the request method in middleware.py, not a per-route
+    # allowlist -- the simpler of two designs discussed, revisit if a
+    # consumer ever needs narrower scope than 'read-only vs full'.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS api_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label TEXT NOT NULL,
+        token_hash TEXT NOT NULL,
+        is_read_only BOOLEAN NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    )''')
+
 def apply_registration_migrations(conn):
     """
     Tables backing device registration/entitlement (REG-1..4, ACCT-3).

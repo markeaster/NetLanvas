@@ -30,10 +30,12 @@ from security.auth import (
     clear_recovery_token, reset_credentials, revoke_all_sessions_for_user,
     get_sole_user_id,
 )
-from security.middleware import check_session
+from security.middleware import check_session, authenticate_bearer_token
 from security.welcome import delete_welcome_file, get_setup_token
 from security.recovery import write_recovery_file, print_recovery_file, delete_recovery_file, get_recovery_token, RECOVERY_PATH
 from security.rate_limit import is_rate_limited, record_attempt, clear_attempts, get_client_ip
+from security.api_tokens import create_api_token, list_api_tokens, revoke_api_token, revoke_all_api_tokens
+from api.mcp_server import mcp as mcp_server_instance, mcp_asgi_app
 from security import device_identity, registration, sync_client
 from security.cert_manager import detect_own_lan_ip
 from security.credential_vault import encrypt_password
@@ -356,6 +358,7 @@ class RecoveryResetRequest(BaseModel): recovery_token: str; new_username: str; n
 class RemoteAccessRequest(BaseModel): enabled: bool
 class SNMPv3IdentityCreateRequest(BaseModel): username: str; password: str; priv_password: str
 class SNMPv3ReorderRequest(BaseModel): ordered_ids: list[int]
+class APITokenCreateRequest(BaseModel): label: str; is_read_only: bool = True
 class VlanNameUpdateRequest(BaseModel): vlan_id: int; vlan_name: str
 class AlertingConfigRequest(BaseModel):
     email_enabled: bool = False
@@ -512,6 +515,54 @@ async def auth_gate(request: Request, call_next):
     if unauthorized is not None:
         return unauthorized
     return await call_next(request)
+
+@app.middleware("http")
+async def mcp_auth_gate(request: Request, call_next):
+    """
+    Gates the /mcp-root mount (api/mcp_server.py) with the same
+    security/api_tokens.py Bearer-token model /api/* uses -- NOT the MCP
+    SDK's own auth framework (would require a real OAuth issuer_url that
+    doesn't exist here) and NOT /api/*'s GET-only-for-read-only-tokens
+    rule (MCP's transport is POST-based JSON-RPC regardless of whether a
+    call reads or writes, and every tool in mcp_server.py is read-only
+    by construction -- see that file's own docstring). A session cookie
+    is never accepted here -- MCP clients are non-browser callers by
+    definition.
+    """
+    if request.url.path.startswith("/mcp-root"):
+        token_row, error = await authenticate_bearer_token(request, get_config_db_connection)
+        if error is not None:
+            return error
+        if token_row is None:
+            return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+    return await call_next(request)
+
+_mcp_session_manager_cm = None
+
+@app.on_event("startup")
+async def start_mcp_session_manager():
+    """
+    Mounting mcp_asgi_app below does NOT start its session manager on
+    its own -- confirmed live in a standalone reproduction before this
+    was wired in here: a mounted-but-unstarted session manager raises
+    \"Task group is not initialized. Make sure to use run().\" on the
+    first request. Entered/exited across the app's own lifetime via
+    these two handlers (the existing on_event startup/shutdown style
+    already used elsewhere in this file, not FastAPI's lifespan=
+    constructor param, to avoid interacting with the other startup
+    handlers already registered below).
+    """
+    global _mcp_session_manager_cm
+    _mcp_session_manager_cm = mcp_server_instance.session_manager.run()
+    await _mcp_session_manager_cm.__aenter__()
+    logger.info("[MCP] Session manager started.")
+
+@app.on_event("shutdown")
+async def stop_mcp_session_manager():
+    if _mcp_session_manager_cm is not None:
+        await _mcp_session_manager_cm.__aexit__(None, None, None)
+
+app.mount("/mcp-root", mcp_asgi_app)
 
 @app.get("/healthz")
 async def healthz():
@@ -807,10 +858,21 @@ async def recovery_reset(req: RecoveryResetRequest, request: Request):
 
         reset_credentials(conn, user_id, new_username, req.new_password)
         revoke_all_sessions_for_user(conn, user_id)
+        # 2026-11-03 security review finding: API tokens are a separate
+        # credential from sessions (security/api_tokens.py) and were never
+        # covered by this reset's "credentials may be compromised" threat
+        # model -- a token minted during a transient session compromise
+        # survived both a password change and revoke_all_sessions_for_user,
+        # since neither touched api_tokens. Closing that gap here, same
+        # reasoning as the session revocation two lines up.
+        revoked_token_count = revoke_all_api_tokens(conn)
         clear_recovery_token(conn)
         delete_recovery_file()
         clear_attempts(client_ip, "recovery_reset")
-        logger.warning(f"[RECOVERY] Credentials reset from {client_ip}. All existing sessions revoked.")
+        logger.warning(
+            f"[RECOVERY] Credentials reset from {client_ip}. All existing sessions revoked. "
+            f"{revoked_token_count} API token(s) also revoked."
+        )
         return {"success": True}
     finally:
         conn.close()
@@ -2049,6 +2111,56 @@ async def reorder_snmp_v3_identities(req: SNMPv3ReorderRequest):
         return {"success": True}
     except Exception as e:
         logger.error(f"[SNMP] reorder_snmp_v3_identities failed: {e}")
+        return {"error": "An internal error occurred. See server logs for details."}
+
+# --- API Tokens (programmatic/non-browser access, e.g. an MCP server) ---
+#
+# Deliberately reachable ONLY via a real session cookie, never via an API
+# token itself -- see middleware.py's API_TOKEN_MANAGEMENT_PATH_PREFIX.
+# The plaintext token is returned exactly once, in the create response
+# below, and never persisted anywhere in retrievable form -- same
+# single-reveal discipline as the setup/recovery tokens. The list route
+# below never returns it again, same convention as /api/snmp/v3-identities
+# never returning its stored password.
+
+@app.get("/api/tokens")
+async def list_api_tokens_route():
+    try:
+        conn = get_config_db_connection()
+        tokens = list_api_tokens(conn)
+        conn.close()
+        return {"tokens": tokens}
+    except Exception as e:
+        logger.error(f"[TOKENS] list_api_tokens failed: {e}")
+        return {"error": "An internal error occurred. See server logs for details."}
+
+@app.post("/api/tokens")
+async def create_api_token_route(req: APITokenCreateRequest):
+    try:
+        label = req.label.strip()
+        if not label:
+            return {"error": "Label cannot be blank."}
+        conn = get_config_db_connection()
+        token_id, plaintext = create_api_token(conn, label, req.is_read_only)
+        conn.close()
+        logger.info(f"[TOKENS] Created API token: label={label}, read_only={req.is_read_only}")
+        return {"success": True, "id": token_id, "token": plaintext}
+    except Exception as e:
+        logger.error(f"[TOKENS] create_api_token failed: {e}")
+        return {"error": "An internal error occurred. See server logs for details."}
+
+@app.delete("/api/tokens/{token_id}")
+async def revoke_api_token_route(token_id: int):
+    try:
+        conn = get_config_db_connection()
+        revoked = revoke_api_token(conn, token_id)
+        conn.close()
+        if not revoked:
+            return {"error": "No such token."}
+        logger.info(f"[TOKENS] Revoked API token id={token_id}")
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"[TOKENS] revoke_api_token failed: {e}")
         return {"error": "An internal error occurred. See server logs for details."}
 
 # --- Alerting (Priority 3) ---
