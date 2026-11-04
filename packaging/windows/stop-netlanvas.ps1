@@ -26,8 +26,8 @@
 # overwrite netlanvas.exe while the previous install's service was
 # still fully running, and DeleteFile would fail with access denied.
 #
-# NATIVE-19 (2026-10-21): two real bugs found live during a Windows
-# machine retirement uninstall, both confirmed on real hardware:
+# NATIVE-19 (2026-10-21): two real bugs found live during a retired
+# Windows build machine's uninstall, both confirmed on real hardware:
 #
 # 1. `& $serviceExe stop | Out-Null` below used to have no timeout of
 #    its own. If the app's own graceful shutdown wedges (the same class

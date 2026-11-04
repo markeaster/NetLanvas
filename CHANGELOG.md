@@ -8,6 +8,34 @@ has been in development and use since 2026, and the current release
 reflects that history, but earlier internal change history isn't
 included here.
 
+## v3.31.4 - 2026-11-04
+
+### Fixed
+
+- **The D-Link passive discovery listener could end up unscoped to a
+  single interface, rather than closed, if no interface could be
+  determined.** The listener (used for DGS-1100-series switches, which
+  only ever broadcast an unsolicited status report rather than answering
+  a query) is meant to bind only to `SCAN_INTERFACE_OVERRIDE` or your
+  default-route NIC, refusing to open at all if neither can be resolved.
+  One fallback path didn't actually implement that refusal — it silently
+  listened on every interface instead. Flagged by CodeQL's static
+  analysis; fixed by making that fallback return early, matching what
+  the function's own documentation already claimed it did. The common
+  case (an interface was resolved) was never affected — `SO_BINDTODEVICE`
+  already scoped it correctly there.
+
+- **Five bundled Python dependencies updated for known vulnerabilities**,
+  including one critical: `certifi` (bundled root CA store contained
+  intermediate CA keys later found to be compromised), `pyasn1`
+  (several quadratic-complexity decoding paths usable for denial of
+  service), `urllib3` (an HTTPS-proxy TLS configuration bug, and
+  unbounded memory use reading a malformed chunked response), `aiohttp`
+  (file-descriptor exhaustion, missing request-header timeout, and
+  several more), and `multidict` (a reference leak). `yarl` was bumped
+  alongside `aiohttp` to satisfy its own updated dependency requirement,
+  not because it was itself flagged.
+
 ## v3.31.1 - 2026-11-03
 
 ### New

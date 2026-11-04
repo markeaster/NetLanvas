@@ -1679,8 +1679,8 @@ def _sync_windows_firewall_rule(enabled: bool, port: int) -> None:
     own -- Windows Defender Firewall has no inbound allow rule for this
     app by default, so a LAN client's connection is silently dropped
     even though `netstat` shows the app correctly LISTENING on all
-    interfaces (confirmed live: exactly this symptom on a Windows test machine before
-    this was added -- app up, port bound, still unreachable from
+    interfaces (confirmed live: exactly this symptom on a Windows test
+    machine before this was added -- app up, port bound, still unreachable from
     another machine).
 
     The installer (packaging/windows/netlanvas.iss) pre-creates this

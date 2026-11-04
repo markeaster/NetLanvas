@@ -590,8 +590,8 @@ async def run_fingerprinter():
                     adaptive_snmp_query(ip, "1.3.6.1.2.1.1.1", walk=True),
                     # HOSTNAME-1: sysName is a DIFFERENT MIB-II object
                     # from sysDescr -- confirmed live against real
-                    # switches on this network (e.g.
-                    # "Netgear-GS748Tv5-Works" vs the long sysDescr
+                    # switches on this network (e.g. a Netgear GS748Tv5's
+                    # admin-set name vs the long sysDescr
                     # firmware string), it's the admin-configured device
                     # name, exactly what "hostname" should mean.
                     adaptive_snmp_query(ip, "1.3.6.1.2.1.1.5", walk=True),

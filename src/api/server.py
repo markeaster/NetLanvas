@@ -83,7 +83,7 @@ def _filter_display_noise_ips(rows: list[dict]) -> list[dict]:
     """
     Nulls ip_address wherever it's never worth showing a human --
     Docker-bridge noise or a synthetic placeholder like the
-    "10.10.10.10033"-style pseudo-address mac_table_scraper's dark-
+    "192.0.2.10033"-style pseudo-address mac_table_scraper's dark-
     matter inference invents for an Unmanaged Switch it's inferred but
     never directly observed (last octet encodes a port number, not a
     real address -- fails ipaddress parsing outright).
@@ -2900,10 +2900,10 @@ async def api_topology(archive: str = Query(None)):
         # the previous query JOINed the two directly, so any device
         # with N owned IPs fanned out into N result rows here, each
         # incrementing client_counts and producing its own duplicate
-        # box in the FBD view. Confirmed live: a lab Raspberry Pi (one real
-        # MAC, three owned IPs -- LAN + two Docker bridge gateways)
+        # box in the FBD view. Confirmed live: a lab Raspberry Pi (one
+        # real MAC, three owned IPs -- LAN + two Docker bridge gateways)
         # showed as 3 identical "homelab-pi" clients behind
-        # Netgear-GS748Tv5-Works, and Netgear-GS110TP-Core showed
+        # a Netgear GS748Tv5, and a separate Netgear GS110TP showed
         # "Clients: 8" with only 3 distinct devices actually drawn.
         # b.ip_address IS NOT NULL was only ever meant as an EXISTENCE
         # check ("this device has some known IP, worth counting at
@@ -3065,7 +3065,7 @@ async def api_inventory_list():
             # port-encoded placeholder, not a real dialable address --
             # see _is_real_ip's own docstring. Same filtering the rest
             # of the UI already applies via _filter_display_noise_ips,
-            # so this page doesn't show "10.10.10.10033" as if it were
+            # so this page doesn't show "192.0.2.10033" as if it were
             # a real IP. run_inventory_snapshot_sync() stores it raw
             # (that's the storage layer's job to stay simple); this is
             # the presentation layer, same as everywhere else it's used.

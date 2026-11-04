@@ -106,11 +106,11 @@
         }
 
         // Which of a multihomed device's several real IPs is the one
-        // relevant to THIS particular subnet column -- e.g. a device
-        // shown under both 10.10.20 and 192.168.20 sorts by its
-        // 10.10.20.x address in the first column and its 192.168.20.x
-        // address in the second, not by whichever address happens to
-        // be "the" primary overall.
+        // relevant to THIS particular subnet column -- e.g. a dual-homed
+        // field appliance shown under both 10.10.20 and 192.168.20 sorts by
+        // its 10.10.20.x address in the first column and its 192.168.20.x
+        // address in the second, not by whichever address happens to be
+        // "the" primary overall.
         function ipInSubnetKey(node, key) {
             return Array.from(node.ip_list).find(ip => ip && ip.split('.').slice(0, 3).join('.') === key) || '';
         }
@@ -267,8 +267,8 @@
                             // and the {...row} spread both already carry it -- but
                             // nothing here ever read it. A device with a stored IP from
                             // hours ago rendered identically to one seen seconds ago, no
-                            // visual distinction at all. Real case: a multi-homed test
-                            // host's VM interfaces stayed looking fully live on this grid for
+                            // visual distinction at all. Real case: a test appliance's Xen VM
+                            // interfaces stayed looking fully live on this grid for
                             // hours after the host itself went offline, correctly
                             // marked 'offline' in device_state the whole time. Only
                             // 'offline' specifically (not any falsy/missing value) --

@@ -32,11 +32,10 @@ async def process_switch_fdb(switch_ip, router_ips, semaphore, is_deep_scan_tick
 
         # SELFMAC-1 (2026-11-02): a device's own bridge FDB can list its
         # OWN interface's MAC as a "self" entry on the port that
-        # interface sits on (confirmed live: a router's FDB listed one
-        # of its own ports' MAC on the same bridge port as a device
-        # wired directly into it, inflating that port's raw_density to
-        # 2 and wrongly re-tripping the router-port backbone penalty
-        # for a port that in reality
+        # interface sits on (confirmed live: the house router's FDB
+        # listed ether7's own MAC on the same bridge port as a NAS appliance,
+        # inflating that port's raw_density to 2 and wrongly re-tripping
+        # the router-port backbone penalty for a port that in reality
         # hosts exactly one real device). Filter these out at the
         # source -- a switch/router's own MAC is never a real endpoint
         # hosted on itself, regardless of which port it reports against.
@@ -241,17 +240,20 @@ async def run_mac_table_scraper(is_deep_scan_tick=False):
         # the router's one-hop-removed view of the same VLAN trunk (e.g. a
         # device plugged into a real switch port, whose traffic the router
         # also sees arrive on its own VLAN sub-interface) should always
-        # resolve to the switch's direct sighting -- confirmed live, a
-        # switch port vs. the router's own echo of the same MAC on its
-        # VLAN sub-interface. A switch's FDB is a more authoritative, more
-        # direct signal than the router's view through a trunk, regardless
-        # of either one's raw density -- but only when that switch-side
-        # sighting is a genuinely GOOD one (not itself already-flagged
-        # backbone). A MAC seen only via OTHER switches' own
-        # uplink-toward-router ports isn't a real alternative leaf
+        # resolve to the switch's direct sighting -- confirmed live via
+        # a Docker host (a Netgear GS748Tv5 port 46 vs the router's own
+        # 'vlan50 - on SFP' echo of the same MAC). A switch's FDB is a
+        # more authoritative, more direct signal than the router's view
+        # through a trunk, regardless of either one's raw density -- but
+        # only when that switch-side sighting is a genuinely GOOD one
+        # (not itself already-flagged backbone). A MAC seen only via
+        # OTHER switches' own uplink-toward-router ports (e.g. a NAS
+        # appliance appearing on two other switches' uplinks, both already
+        # correctly Loop-A-penalized) isn't a real alternative leaf
         # position, just the same router-side echo seen from one hop
         # further out -- preferring it would purge the one genuine
-        # location a device wired directly into the router actually has.
+        # location a direct-to-router device like that NAS appliance actually has.
+        # See project_netlanvas_topology_... memory for the investigation.
         good_non_router_locations = [
             loc for loc in locations
             if loc[0] not in router_ips and port_weights.get(f"{loc[0]}:{loc[1]}", 9999) < 10000

@@ -45,7 +45,7 @@ _MAC_RE = re.compile(r"\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b")
 # DEBUG line PER CANDIDATE TARGET it attempts (reachability test, sysObjectID
 # extraction, ARP/FDB walk, etc.) -- fired for every IP it tries, whether or
 # not that IP ever turns into a confirmed device. Found live: a real user
-# ("Chris") with a small, sparse home network had his telemetry submission
+# with a small, sparse home network had their telemetry submission
 # rejected by the webhost's cross-validation check every time (up to
 # found=867, matched=46) -- root cause traced to this exact pattern. On a
 # dense lab network (the appliance's own primary test environment) almost

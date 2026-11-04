@@ -66,7 +66,7 @@ async def dump_target(ip, hostname, dev_type, credential, output_lines):
 
 
 async def main():
-    # Optional: `python3 snmp_dump.py 10.10.10.50` dumps just that one
+    # Optional: `python3 snmp_dump.py 192.0.2.50` dumps just that one
     # IP, regardless of whether it's already correctly classified in
     # the DB -- this is the case SNMP-11 actually exists for: a device
     # NetLanvas isn't identifying right. No argument falls back to the

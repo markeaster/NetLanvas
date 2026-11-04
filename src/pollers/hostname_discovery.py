@@ -8,8 +8,8 @@ existing mDNS sweep, which only catches devices publishing one of a
 curated list of IoT/media service types.
 
 1. Reverse mDNS PTR lookup (<reversed-ip>.in-addr.arpa over
-   224.0.0.251:5353) -- confirmed live against a test lab's own
-   containers: works against stock avahi-daemon with NO special config
+   224.0.0.251:5353) -- confirmed live against a dedicated network-
+   simulation test rig's containers: works against stock avahi-daemon with NO special config
    (publish-workstation left at its default "no"), since answering a
    PTR-for-my-own-address query is baseline mDNS responder behavior,
    not a service announcement. A host running no mDNS responder at all

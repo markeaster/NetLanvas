@@ -42,8 +42,8 @@ TL-SG105E, both on the user's own network):
   to 239.255.255.250:1900. CONFIRMED WORKING live against the real
   GS308Ev4: it answers with `SERVER: Netgear_Switch UPnP/1.1
   GS308Ev4/V1.0.1.3`, a clean vendor+exact-model+firmware string, and
-  a `USN: uuid:...-28940175fae9` whose trailing 12 hex chars ARE the
-  device's real MAC (28:94:01:75:fa:e9, cross-checked against
+  a `USN: uuid:...-28940100aabb` whose trailing 12 hex chars ARE the
+  device's real MAC (28:94:01:00:aa:bb, cross-checked against
   l3_bindings). This is by far the highest-confidence signal in this
   file -- a real device volunteering its own identity over a standard
   protocol, not a guessed byte layout. Root cause for why NSDP (below)
@@ -260,20 +260,26 @@ def _listen_udp_broadcast(port: int, timeout: float) -> List[Tuple[bytes, str]]:
     IPv4 address the listener stays closed rather than falling back to
     accepting on every interface."""
     iface = str(config._get_setting("SCAN_INTERFACE_OVERRIDE", "") or "").strip() or _primary_lan_interface()
-    allowed_net = None
-    if iface:
-        allowed_net = _interface_ipv4_network(iface)
-        if allowed_net is None:
-            logger.warning(f"[SmartSwitch] Passive listen on port {port} skipped: interface '{iface}' is missing or has no IPv4 address")
-            return []
+    if not iface:
+        logger.warning(f"[SmartSwitch] Passive listen on port {port} skipped: no scan interface could be determined (no SCAN_INTERFACE_OVERRIDE set and no default-route NIC found) -- refusing to listen unscoped rather than falling back to all interfaces")
+        return []
+    allowed_net = _interface_ipv4_network(iface)
+    if allowed_net is None:
+        logger.warning(f"[SmartSwitch] Passive listen on port {port} skipped: interface '{iface}' is missing or has no IPv4 address")
+        return []
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     packets: List[Tuple[bytes, str]] = []
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if iface:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
-        else:
-            bind_socket_to_scan_interface(sock)
+        # SO_BINDTODEVICE pins this socket to `iface` at the kernel level (send+receive,
+        # ahead of routing) -- iface is guaranteed set here, the no-interface case returned
+        # above. The 0.0.0.0 bind below is standard/required alongside SO_BINDTODEVICE:
+        # UDP broadcast reception needs the wildcard IP (DDP's switch report is a broadcast
+        # packet, which a socket bound to a specific unicast address would never receive,
+        # independent of the device being pinned) -- CodeQL's py/bind-socket-all-network-
+        # interfaces rule flags the literal pattern regardless, since it doesn't model
+        # SO_BINDTODEVICE's effect; this is a known, accepted false positive on this line.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
         sock.bind(("0.0.0.0", port))
         deadline = time.monotonic() + timeout
         while True:

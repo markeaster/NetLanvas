@@ -22,7 +22,7 @@
     previously used a doubled hyphen as punctuation, which the XML
     spec forbids anywhere inside a comment's content; that broke
     netlanvas-service.exe's own config parsing outright, confirmed
-    live on Marks-PC via WinSW's own FATAL error citing this exact
+    live on a Windows test machine via WinSW's own FATAL error citing this exact
     file and line. Never place two consecutive hyphen characters
     anywhere in this comment block, including inside quoted examples.
   -->

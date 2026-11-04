@@ -232,7 +232,7 @@ async def run_snmp_pipeline(ip: str, credential: SNMPCredential, is_deep_scan_ti
     # from every FAST poll for up to 12 hours, even if the device would
     # have answered fine on the very next tick. Confirmed live: this is
     # what dropped the GS748 switch's Q-BRIDGE-MIB FDB walk (step 40)
-    # for one test host's connection. Replaced with is_deep_scan_tick,
+    # for a connected Docker host. Replaced with is_deep_scan_tick,
     # threaded down from main.py's own tick loop -- every step gets
     # re-checked on the SAME cadence as every other structural deep-scan
     # (unification, inference, LLDP, etc.), so a bad poll self-heals at

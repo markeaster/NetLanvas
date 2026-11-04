@@ -84,7 +84,7 @@ def _detect_default_gateway_macos():
 
         route to: default
         destination: default
-        gateway: 192.168.1.1
+        gateway: 192.0.2.1
         interface: en0
         ...
 
@@ -119,10 +119,11 @@ def bind_socket_to_scan_interface(sock) -> None:
     mDNS reverse lookup) had no interface scoping at all, so the kernel
     picked whatever the box's REAL default route was for outbound
     broadcast/multicast traffic -- the management NIC, never the
-    override interface. Confirmed live 2026-09-11 on a multi-homed test
-    gateway: real production-LAN devices (two management-network Netgear
-    switches) were discovered and logged by an appliance that was
-    supposed to be strictly isolated to its own test segment.
+    override interface. Confirmed live 2026-09-11 on a dedicated
+    multi-homed test appliance: real production-LAN devices (two
+    management-network Netgear switches)
+    were discovered and logged by an appliance that was supposed to be
+    strictly isolated to its own test segment.
 
     SO_BINDTODEVICE pins a socket to a specific NIC for BOTH send and
     receive, at the kernel level, ahead of normal routing-table
@@ -197,8 +198,8 @@ def enumerate_host_network_interfaces():
     only so far" but nothing actually enforced it here -- this function
     unconditionally shelled out to `ip`, so main.py's per-tick
     stage_publish_network_interfaces() called it every single tick on
-    every platform, not just Linux. On Windows (confirmed live on a real
-    Windows box) that's a FileNotFoundError ([WinError 2]) logged at ERROR
+    every platform, not just Linux. On Windows (confirmed live on a
+    Windows test machine) that's a FileNotFoundError ([WinError 2]) logged at ERROR
     level every tick, forever -- harmless (falls back to an empty list,
     which native Windows/macOS never even read back out, since
     /api/settings/network-interfaces already gates on Linux before ever
@@ -232,7 +233,7 @@ def enumerate_host_network_interfaces():
         # whenever an interface comes up before DHCP/static config
         # lands). Taking the first addr_info entry silently picked
         # whichever the kernel happened to list first -- confirmed live
-        # 2026-09-11: enp1s0's real 192.168.100.1 was listed SECOND,
+        # 2026-09-11: enp1s0's real 192.0.2.1 was listed SECOND,
         # after a 169.254.x.x link-local entry, so this dropdown was
         # showing the wrong address entirely. Prefer global scope
         # (a real routable address) over link scope; only fall back to
@@ -273,8 +274,8 @@ def resolve_own_interface_mac(ip: str) -> str | None:
     scenario this exists for (a multi-homed Linux testing-gateway
     appliance acting as its own router) is Linux-only by construction,
     but this function had no platform guard of its own and ran every
-    tick on every platform regardless -- confirmed live on a real
-    Windows box, one wasted `ip` subprocess-spawn attempt and a caught
+    tick on every platform regardless -- confirmed live on a Windows
+    test machine, one wasted `ip` subprocess-spawn attempt and a caught
     FileNotFoundError per tick, forever. Harmless (falls through to
     the existing ARP/SNMP resolution same as if this returned None
     normally) but pure wasted work with zero chance of ever matching
@@ -444,7 +445,7 @@ def resolve_local_arp_mac(ip: str) -> str | None:
 
         if platform.system() == "Darwin":
             # NATIVE-8 (macOS): `arp -n <ip>` prints e.g.
-            # "? (192.168.1.1) at 4:f4:1c:f5:88:94 on en0 ifscope [ethernet]"
+            # "? (192.0.2.1) at 4:f4:1c:f5:88:94 on en0 ifscope [ethernet]"
             # -- notably, BSD arp omits leading zeros per octet (single
             # hex digit where Linux/Windows always show two), so each
             # octet needs zero-padding before it can match _MAC_RE.

@@ -23,7 +23,7 @@ services:
     build:
       context: .
       args:
-        NETLANVAS_VERSION: v3.31.1
+        NETLANVAS_VERSION: v3.31.4
     container_name: netlanvas_redis_secrets_init
     restart: "no"
     volumes:
@@ -103,7 +103,7 @@ services:
       # release -- same manual-bump discipline as that script, just a
       # second place now.
       args:
-        NETLANVAS_VERSION: v3.31.1
+        NETLANVAS_VERSION: v3.31.4
     container_name: netlanvas_core
     restart: unless-stopped
     network_mode: "host"
@@ -162,7 +162,7 @@ services:
       # release -- same manual-bump discipline as that script, just a
       # second place now.
       args:
-        NETLANVAS_VERSION: v3.31.1
+        NETLANVAS_VERSION: v3.31.4
     container_name: netlanvas_api
     restart: unless-stopped
     networks:

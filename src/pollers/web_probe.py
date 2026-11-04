@@ -1,7 +1,7 @@
 """
 pollers/web_probe.py
 
-WEB-1 (feature request via Report-a-Bug, 2026-09-15, mark@easters.org):
+WEB-1 (feature request via Report-a-Bug, 2026-09-15):
 for every known IP, do a best-effort check for a web server on 443
 then 80 and record what it says about itself -- powers the Graph UI's
 "Open Web Page" context-menu item (see links.html), which only shows
